@@ -1,0 +1,6 @@
+{
+  "name": "NetSim-Architect",
+  "description": "Ultra detaylı, vidadan koda (Screw-to-Code) fiziksel ve mantıksal ağ ve veri merkezi simülatörü.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
