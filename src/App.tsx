@@ -1,41 +1,59 @@
-import { useState, useEffect, useRef } from "react";
-import { 
-  Network, Server as ServerIcon, Shield, Database, Activity, 
-  Cpu, Zap, Info, Play, RefreshCw, Terminal, Plus, Trash2, 
-  Layers, HardDrive, Settings, AlertTriangle, CheckCircle2, 
-  Send, HelpCircle, ArrowRight, Cable, Compass, LogIn
+import { useState, useEffect, useRef, useCallback } from "react";
+import {
+  Network, Server as ServerIcon, Shield, Database, Activity,
+  Cpu, Zap, Play, RefreshCw, Terminal, Trash2,
+  Layers, Settings, AlertTriangle, CheckCircle2,
+  Send, Cable, Compass, ChevronRight, CheckSquare2,
+  Sun, Moon
 } from "lucide-react";
 import { COMPANY_PRESETS, PHASE_GUIDES, VLAN_MATRIX_PRESET, PACKET_SCENARIOS, CompanyPreset } from "./data";
 import { NetworkAssets, RackItem, VlanMapping, ChatMessage } from "./types";
 import DesignerPortal from "./components/DesignerPortal";
 
-export default function App() {
-  // Preset state
-  const [selectedPreset, setSelectedPreset] = useState<CompanyPreset>(COMPANY_PRESETS[1]); // Default: Orta Ölçekli
-  const [assets, setAssets] = useState<NetworkAssets>({
-    pcs: COMPANY_PRESETS[1].pcs,
-    ipPhones: COMPANY_PRESETS[1].ipPhones,
-    wifiAPs: COMPANY_PRESETS[1].wifiAPs,
-    cameras: COMPANY_PRESETS[1].cameras,
-    printers: COMPANY_PRESETS[1].printers,
-    plcs: COMPANY_PRESETS[1].plcs,
-    cncs: COMPANY_PRESETS[1].cncs,
-    modbusGateways: COMPANY_PRESETS[1].modbusGateways,
-    spines: COMPANY_PRESETS[1].spines,
-    leafs: COMPANY_PRESETS[1].leafs,
-    firewalls: COMPANY_PRESETS[1].firewalls,
-    servers: COMPANY_PRESETS[1].servers,
-    sanStorages: COMPANY_PRESETS[1].sanStorages,
-    smartPDUs: COMPANY_PRESETS[1].smartPDUs,
-    racks: COMPANY_PRESETS[1].racks,
+// ─── One-time migration: reset assets to zero on schema version bump ─────────
+const APP_VERSION = 'v3';
+if (typeof localStorage !== 'undefined' && localStorage.getItem('ns-app-version') !== APP_VERSION) {
+  localStorage.setItem('ns-app-version', APP_VERSION);
+  localStorage.removeItem('ns-assets');
+}
+
+// ─── localStorage persistence hook ───────────────────────────────────────────
+function useLocalStorage<T>(key: string, defaultValue: T): [T, (v: T) => void] {
+  const [state, setState] = useState<T>(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      return stored !== null ? (JSON.parse(stored) as T) : defaultValue;
+    } catch {
+      return defaultValue;
+    }
   });
+  const setStored = useCallback((value: T) => {
+    setState(value);
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }, [key]);
+  return [state, setStored];
+}
 
-  // Lifted states from DesignerPortal
-  const [numFloors, setNumFloors] = useState<number>(2); // 1, 2 or 3 floors
-  const [isRedundant, setIsRedundant] = useState<boolean>(true); // Redundant HA toggle
+export default function App() {
+  // ─── Persistent state (survives page refresh) ────────────────────────────
+  const [darkMode, setDarkMode] = useLocalStorage<boolean>('ns-dark', true);
+  const [portalMode, setPortalMode] = useLocalStorage<'simulation' | 'designer'>('ns-mode', 'designer');
+  const [currentPhase, setCurrentPhase] = useLocalStorage<number>('ns-phase', 1);
+  const [numFloors, setNumFloors] = useLocalStorage<number>('ns-floors', 2);
+  const [isRedundant, setIsRedundant] = useLocalStorage<boolean>('ns-redundant', true);
+  const [budgetTier, setBudgetTier] = useLocalStorage<'economic' | 'medium' | 'premium'>('ns-tier', 'medium');
+  const [visitedPhases, setVisitedPhases] = useLocalStorage<number[]>('ns-visited', [1]);
 
-  // Current tutorial phase (1 to 5)
-  const [currentPhase, setCurrentPhase] = useState<number>(1);
+  // Preset state (index only persisted, object derived)
+  const [selectedPresetIdx, setSelectedPresetIdx] = useLocalStorage<number>('ns-preset-idx', 1);
+  const selectedPreset = COMPANY_PRESETS[selectedPresetIdx] ?? COMPANY_PRESETS[1];
+
+  const defaultAssets: NetworkAssets = {
+    pcs: 0, ipPhones: 0, wifiAPs: 0, cameras: 0, printers: 0,
+    plcs: 0, cncs: 0, modbusGateways: 0, spines: 0, leafs: 0,
+    firewalls: 0, servers: 0, sanStorages: 0, smartPDUs: 0, racks: 0,
+  };
+  const [assets, setAssets] = useLocalStorage<NetworkAssets>('ns-assets', defaultAssets);
   
   // Custom states for Phase 1: Rack Designer
   const [rackItems, setRackItems] = useState<RackItem[]>([]);
@@ -90,6 +108,16 @@ export default function App() {
   const [spine1Power, setSpine1Power] = useState<boolean>(true);
   const [fiberCut, setFiberCut] = useState<boolean>(false);
 
+  // AI API Key — client-side fallback (only used when server has no key in .env)
+  const [geminiKey, setGeminiKey] = useLocalStorage<string>('ns-gemini-key', '');
+  const [showKeyModal, setShowKeyModal] = useState<boolean>(false);
+  const [keyInputValue, setKeyInputValue] = useState<string>('');
+  const [serverHasKey, setServerHasKey] = useState<boolean>(false);
+
+  useEffect(() => {
+    fetch('/api/ai-status').then(r => r.json()).then(d => setServerHasKey(d.serverKeySet)).catch(() => {});
+  }, []);
+
   // AI Assistant Chat state
   const [chatInput, setChatInput] = useState<string>("");
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
@@ -101,50 +129,43 @@ export default function App() {
   ]);
   const [isAiLoading, setIsAiLoading] = useState<boolean>(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const isChatMounted = useRef<boolean>(false);
 
-  // Portal and Designer states
-  const [portalMode, setPortalMode] = useState<'simulation' | 'designer'>('designer'); // Default to 'designer' since that is what the user requested!
-  const [designerSubTab, setDesignerSubTab] = useState<'topology' | 'budget' | 'components' | 'checklist'>('topology');
-  const [budgetLimit, setBudgetLimit] = useState<number>(75000); // default maximum budget limit in USD
-  const [budgetTier, setBudgetTier] = useState<'economic' | 'medium' | 'premium'>('medium');
   const [selectedTopologyNode, setSelectedTopologyNode] = useState<string | null>(null);
-  
+
   // Interactive Checklist steps ticked status
-  const [checklistCompleted, setChecklistCompleted] = useState<Record<string, boolean>>({
-    step1: false,
-    step2: false,
-    step3: false,
-    step4: false,
-    step5: false,
-    step6: false,
-    step7: false,
-    step8: false,
+  const [checklistCompleted, setChecklistCompleted] = useLocalStorage<Record<string, boolean>>('ns-checklist', {
+    step1: false, step2: false, step3: false, step4: false,
+    step5: false, step6: false, step7: false, step8: false,
   });
+
+  // ─── Scroll to top on first mount ───────────────────────────────────────
+  useEffect(() => {
+    history.scrollRestoration = 'manual';
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    document.documentElement.scrollTop = 0;
+    document.body.scrollTop = 0;
+  }, []);
+
+  // ─── Dark / Light mode class on <html> ──────────────────────────────────
+  useEffect(() => {
+    document.documentElement.classList.toggle('light', !darkMode);
+  }, [darkMode]);
 
   // Handle Preset changes
   const applyPreset = (preset: CompanyPreset) => {
-    setSelectedPreset(preset);
-    setAssets({
-      pcs: preset.pcs,
-      ipPhones: preset.ipPhones,
-      wifiAPs: preset.wifiAPs,
-      cameras: preset.cameras,
-      printers: preset.printers,
-      plcs: preset.plcs,
-      cncs: preset.cncs,
-      modbusGateways: preset.modbusGateways,
-      spines: preset.spines,
-      leafs: preset.leafs,
-      firewalls: preset.firewalls,
-      servers: preset.servers,
-      sanStorages: preset.sanStorages,
-      smartPDUs: preset.smartPDUs,
-      racks: preset.racks,
-    });
-    // Set dynamic floors and redundancy based on selected preset
+    const idx = COMPANY_PRESETS.findIndex(p => p.name === preset.name);
+    setSelectedPresetIdx(idx >= 0 ? idx : 1);
+    const newAssets: NetworkAssets = {
+      pcs: preset.pcs, ipPhones: preset.ipPhones, wifiAPs: preset.wifiAPs,
+      cameras: preset.cameras, printers: preset.printers, plcs: preset.plcs,
+      cncs: preset.cncs, modbusGateways: preset.modbusGateways, spines: preset.spines,
+      leafs: preset.leafs, firewalls: preset.firewalls, servers: preset.servers,
+      sanStorages: preset.sanStorages, smartPDUs: preset.smartPDUs, racks: preset.racks,
+    };
+    setAssets(newAssets);
     setIsRedundant(preset.firewalls > 1);
     setNumFloors(preset.name.includes("Küçük") ? 1 : preset.name.includes("Orta") ? 2 : 3);
-
     setDisasterLog([]);
     setSpine1Power(true);
     setFiberCut(false);
@@ -312,10 +333,41 @@ export default function App() {
     setRackItems(initialItems);
   }, [assets, isRedundant]);
 
-  // Sync scroll to chat messages
+  // Sync scroll to chat messages (ilk yüklemede scroll yapma)
   useEffect(() => {
+    if (!isChatMounted.current) {
+      isChatMounted.current = true;
+      return;
+    }
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [chatMessages, isAiLoading]);
+
+  // Phase guidance: AI message when entering a new phase for the first time
+  const phaseGuidance: Record<number, string> = {
+    1: `📐 Faz 1 — Fiziksel Altyapı: Rack kabinin montajını, UPS + PDU bağlantılarını ve Cat6/OM4 kablolama düzenini burada simüle ediyorsunuz.\n\n✅ Bu fazda yapmanız gerekenler:\n• Sol panelden ekipman envanteri girin\n• 42U rack kabinine donanımları yerleştirin\n• Kablo etiketleyici ile her bağlantıyı etiketleyin\n\n➡️ Tamamladığında Faz 2'ye geçin: Omurga CLI Yapılandırması.`,
+    2: `🔗 Faz 2 — Omurga & Underlay CLI: OSPF/BGP ile Spine-Leaf arası L3 routing konfigürasyonunu burada uyguluyorsunuz.\n\n✅ Bu fazda yapmanız gerekenler:\n• SPINE-1, SPINE-2 ve LEAF CLI komutlarını inceleyin\n• OSPF Area 0 loopback adreslerini kontrol edin\n• 10G SFP+ uplink portlarını yapılandırın\n\n➡️ Tamamladığında Faz 3'e geçin: VLAN & vPC Mantıksal Segmentasyon.`,
+    3: `🔀 Faz 3 — Mantıksal Segmentasyon (VLAN/vPC): Ofis, ses, kamera ve OT ağlarını ayrı VLAN'lara bölüyoruz.\n\n✅ Bu fazda yapmanız gerekenler:\n• Varsayılan VLAN matrisini inceleyin (10/20/30/50/90)\n• Projenize özel yeni VLAN ekleyin\n• vPC Peer-Link durumunu simüle edin\n\n➡️ Tamamladığında Faz 4'e geçin: Edge Güvenlik & SAN Depolama.`,
+    4: `🛡️ Faz 4 — Güvenlik & SAN Depolama: NGFW HA cluster ve SAN storage bağlantılarını yapılandırıyoruz.\n\n✅ Bu fazda yapmanız gerekenler:\n• WAN ISP-1/ISP-2 yedekliliğini aktif edin\n• SAN IOPS ve PFC/ECN ayarlarını inceleyin\n• FortiGate Active-Passive HA durumunu kontrol edin\n\n➡️ Tamamladığında Faz 5'e geçin: Arıza Simülasyonu & Paket İzleme.`,
+    5: `🔥 Faz 5 — Arıza Simülasyonu & Sorun Giderme: Üretim ortamındaki olası arızaları simüle edip ağın nasıl tepki verdiğini gözlemliyoruz.\n\n✅ Bu fazda yapmanız gerekenler:\n• Spine Switch güç kesintisi senaryosunu tetikleyin\n• Fiber hat kopması simülasyonunu çalıştırın\n• Paket izleme (Packet Walk) adımlarını takip edin\n\n🏆 Tüm fazları tamamladınız! Designer Portalında kendi altyapınızı tasarlayabilirsiniz.`,
+  };
+
+  const switchPhase = useCallback((newPhase: number) => {
+    const isNew = !visitedPhases.includes(newPhase);
+    setCurrentPhase(newPhase);
+    if (isNew) {
+      setVisitedPhases([...visitedPhases, newPhase]);
+      const guidance = phaseGuidance[newPhase];
+      if (guidance) {
+        setTimeout(() => {
+          setChatMessages(prev => [...prev, {
+            sender: 'assistant',
+            text: guidance,
+            timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
+          }]);
+        }, 500);
+      }
+    }
+  }, [visitedPhases, setVisitedPhases, setCurrentPhase]);
 
   // Setup dynamic Underlay Routing Command Output
   useEffect(() => {
@@ -395,10 +447,7 @@ router ospf 1
 
   // Asset increment/decrement helper
   const updateAsset = (key: keyof NetworkAssets, delta: number) => {
-    setAssets(prev => ({
-      ...prev,
-      [key]: Math.max(0, prev[key] + delta)
-    }));
+    setAssets({ ...assets, [key]: Math.max(0, assets[key] + delta) });
   };
 
   // Add custom Rack Item
@@ -549,11 +598,10 @@ router ospf 1
     try {
       const res = await fetch("/api/assistant", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           message: promptToSend,
+          apiKey: geminiKey,
           context: {
             officeEndpoints: `PC: ${assets.pcs}, IP Tel: ${assets.ipPhones}, AP: ${assets.wifiAPs}, Yazıcı: ${assets.printers}`,
             otAssets: `PLC: ${assets.plcs}, CNC: ${assets.cncs}, Modbus Gateway: ${assets.modbusGateways}`,
@@ -563,12 +611,34 @@ router ospf 1
         })
       });
 
+      const data = await res.json();
+
       if (!res.ok) {
-        const errorData = await res.json();
-        throw new Error(errorData.error || "Sunucudan hata döndü.");
+        if (data.error === 'API_KEY_MISSING' || data.error === 'API_KEY_INVALID') {
+          const isInvalid = data.error === 'API_KEY_INVALID';
+          setGeminiKey('');
+          setShowKeyModal(true);
+          setKeyInputValue('');
+          setChatMessages(prev => [...prev, {
+            sender: 'assistant',
+            text: isInvalid
+              ? '🔑 Bu API key geçersiz veya kotası sıfır. aistudio.google.com/app/apikey adresinden YENİ bir key al — "Create API key" butonuna tıkla, ücretsizdir.'
+              : '🔑 Gemini API key gerekli. Sağ üstteki "API Key Gir" butonuna tıklayarak key\'ini gir.',
+            timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
+          }]);
+          return;
+        }
+        if (data.error === 'RATE_LIMIT') {
+          setChatMessages(prev => [...prev, {
+            sender: 'assistant',
+            text: '⏳ Kota aşıldı. Bu key\'in free tier limiti dolmuş. aistudio.google.com/app/apikey adresinden yeni bir Google hesabıyla taze key oluştur.',
+            timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
+          }]);
+          return;
+        }
+        throw new Error(data.error || "Sunucudan hata döndü.");
       }
 
-      const data = await res.json();
       setChatMessages(prev => [...prev, {
         sender: 'assistant',
         text: data.text,
@@ -576,27 +646,11 @@ router ospf 1
       }]);
     } catch (err: any) {
       console.error(err);
-      // Mock / fallback response if API is offline or missing key
-      const fallbackReplies: Record<string, string> = {
-        "bgp": "BGP (Sınır Geçit Protokolü) yapılandırması:\n\nSpine switchler internal BGP (iBGP) veya harici eBGP olarak yapılandırılabilir. Spine-Leaf mimarisinde yaygın olan eBGP modelinde, her bir Leaf switch'e farklı bir Özel Otonom Sistem Numarası (ASN) verilir (Örn: Spine-1 için AS 65001, Leaf-1 için AS 65101). Bu sayede rotaların döngüye girmesi engellenir.\n\nFiziksel bağlantı için OM4 fiber kablo ve 100G QSFP28 modüller kullanılır. Komut dizisi:\n`router bgp 65101`\n`  neighbor 10.255.0.1 remote-as 65001`",
-        "fiber": "OM4 çok modlu fiber (Multi-mode), 850nm dalga boyunda çalışır ve LC-LC konektörler ile sonlandırılır. Kabinetler arası omurga bağlantısı kurarken OM4 kablonun ucu alkollü solüsyonla temizlenmeli ve lazer ışığının göze gelmemesine dikkat edilmelidir.",
-        "lacp": "vPC veya MC-LAG ile LACP Mode 4 (Active/Active) yapılandırılırken sunucu tarafında 'NIC Teaming / Bonding Mode 4' kurulur. Bu sayede sunucu üzerindeki iki adet fiziksel 10G/25G SFP28 portu birleştirilerek tek bir 20G/50G mantıksal arayüze dönüştürülür.",
-        "default": "Verdiğiniz altyapı parametrelerini inceledim. 'Screw-to-Code' metodolojimiz uyarınca, bu ağın inşası için fiziksel katmanda en az Cat6A bakır kablolar ve kabinetler arası OM4 multi-mode fiberler kullanmalıyız. Mantıksal katmanda ise segmentasyon için yapılandırdığınız VLAN'ları (VLAN 10, 20, 30, 50, 90) ToR switchlerinizde trunking kurarak NGFW (güvenlik duvarı) ile sarmallayacağız. Sorunuzla ilgili daha fazla detay almak istediğiniz CLI komutlarını belirtebilirsiniz!"
-      };
-      
-      let replyText = fallbackReplies.default;
-      const lower = promptToSend.toLowerCase();
-      if (lower.includes("bgp") || lower.includes("routing")) replyText = fallbackReplies.bgp;
-      else if (lower.includes("fiber") || lower.includes("kablo")) replyText = fallbackReplies.fiber;
-      else if (lower.includes("lacp") || lower.includes("vpc") || lower.includes("bonding")) replyText = fallbackReplies.lacp;
-
-      setTimeout(() => {
-        setChatMessages(prev => [...prev, {
-          sender: 'assistant',
-          text: `⚠️ NOT: Gerçek zamanlı AI servisi şu an demo / çevrimdışı modda çalışıyor (Settings > Secrets panelinden GEMINI_API_KEY girildiğinde aktif olur). Ancak mimari motorumuz size şu yanıtı hazırladı:\n\n${replyText}`,
-          timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
-        }]);
-      }, 800);
+      setChatMessages(prev => [...prev, {
+        sender: 'assistant',
+        text: `❌ Hata: ${err.message}`,
+        timestamp: new Date().toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' })
+      }]);
     } finally {
       setIsAiLoading(false);
     }
@@ -608,22 +662,82 @@ router ospf 1
   const totalCablesEstimated = assets.pcs + assets.ipPhones + assets.cameras + assets.plcs + (assets.servers * 4) + (assets.leafs * 4);
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 font-sans flex flex-col selection:bg-blue-500/10 selection:text-blue-600">
+    <div className="min-h-screen font-sans flex flex-col" style={{ color: 'var(--ns-text)' }}>
       
       {/* HEADER SECTION */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-50 px-4 py-3 md:px-6">
+      <header className="sticky top-0 z-50 px-4 py-3 md:px-6 border-b" style={{ background: 'var(--ns-header-bg)', borderColor: 'var(--ns-border)' }}>
         <div className="max-w-full px-4 md:px-8 lg:px-12 w-full mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 bg-blue-600 rounded flex items-center justify-center text-white font-bold text-xl">N</div>
+            {/* Network topology logo */}
+            <div className="w-9 h-9 rounded-lg flex items-center justify-center glow-cyan flex-shrink-0" style={{ background: 'linear-gradient(135deg, #0c4a6e 0%, #1e3a5f 100%)', border: '1px solid rgba(6,182,212,0.3)' }}>
+              <svg width="26" height="26" viewBox="0 0 36 36" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                  <linearGradient id="ngl" x1="0" y1="0" x2="36" y2="36" gradientUnits="userSpaceOnUse">
+                    <stop stopColor="#06b6d4"/>
+                    <stop offset="1" stopColor="#3b82f6"/>
+                  </linearGradient>
+                </defs>
+                {/* Spine (core) */}
+                <rect x="11" y="1" width="14" height="8" rx="2.5" fill="url(#ngl)"/>
+                {/* Leaf switches */}
+                <rect x="1" y="14" width="11" height="7" rx="2" fill="#3b82f6" opacity="0.9"/>
+                <rect x="24" y="14" width="11" height="7" rx="2" fill="#3b82f6" opacity="0.9"/>
+                {/* Servers */}
+                <rect x="1" y="27" width="7" height="8" rx="1.5" fill="#8b5cf6" opacity="0.85"/>
+                <rect x="14.5" y="27" width="7" height="8" rx="1.5" fill="#8b5cf6" opacity="0.85"/>
+                <rect x="28" y="27" width="7" height="8" rx="1.5" fill="#8b5cf6" opacity="0.85"/>
+                {/* Spine → Leaf uplinks */}
+                <line x1="18" y1="9" x2="6.5" y2="14" stroke="#06b6d4" strokeWidth="1.6" strokeLinecap="round"/>
+                <line x1="18" y1="9" x2="29.5" y2="14" stroke="#06b6d4" strokeWidth="1.6" strokeLinecap="round"/>
+                {/* Leaf → Server downlinks */}
+                <line x1="6.5" y1="21" x2="4.5" y2="27" stroke="#3b82f6" strokeWidth="1.2" strokeLinecap="round" opacity="0.85"/>
+                <line x1="6.5" y1="21" x2="18" y2="27" stroke="#3b82f6" strokeWidth="1.2" strokeLinecap="round" opacity="0.85"/>
+                <line x1="29.5" y1="21" x2="18" y2="27" stroke="#3b82f6" strokeWidth="1.2" strokeLinecap="round" opacity="0.85"/>
+                <line x1="29.5" y1="21" x2="31.5" y2="27" stroke="#3b82f6" strokeWidth="1.2" strokeLinecap="round" opacity="0.85"/>
+              </svg>
+            </div>
             <div>
-              <h1 className="text-lg font-bold tracking-tight text-slate-800">
-                NetSim-Architect
+              <h1 className="text-base font-black tracking-widest" style={{ fontFamily: 'Orbitron, monospace', letterSpacing: '0.12em', color: 'var(--ns-text)' }}>
+                NetSim<span style={{ color: 'var(--ns-accent)' }}>-Architect</span>
               </h1>
-              <p className="text-xs text-slate-500 uppercase tracking-widest">Sistem Tasarım ve Altyapı Motoru</p>
+              <p className="text-[9px] tracking-[0.22em] uppercase" style={{ color: 'var(--ns-text-dim)' }}>Sistem Tasarım &amp; Altyapı Motoru</p>
             </div>
           </div>
 
-          <div className="flex flex-col sm:flex-row items-center gap-4 w-full md:w-auto justify-end">
+          <div className="flex items-center gap-3">
+            <div className="hidden md:flex items-center gap-2 px-3 py-1 rounded-full border text-[9px] font-mono font-bold" style={{ borderColor: 'rgba(34,197,94,0.3)', color: '#22c55e', background: 'rgba(34,197,94,0.07)' }}>
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 neon-pulse inline-block" />
+              SYSTEM ONLINE — SCREW-TO-CODE v2.0
+            </div>
+
+            {/* Dark / Light mode toggle */}
+            <button
+              onClick={() => setDarkMode(!darkMode)}
+              className="flex items-center justify-center w-8 h-8 rounded-full transition-all"
+              style={{ background: darkMode ? 'rgba(251,191,36,0.1)' : 'rgba(6,182,212,0.1)', border: darkMode ? '1px solid rgba(251,191,36,0.3)' : '1px solid rgba(6,182,212,0.3)', color: darkMode ? '#fbbf24' : '#0891b2' }}
+              title={darkMode ? 'Aydınlık Moda Geç' : 'Karanlık Moda Geç'}
+            >
+              {darkMode ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
+            </button>
+
+            {/* AI status */}
+            {serverHasKey ? (
+              <div className="hidden md:flex items-center gap-1.5 text-[10px] font-mono font-bold px-3 py-1.5 rounded-full" style={{ background: 'rgba(34,197,94,0.1)', color: '#22c55e', border: '1px solid rgba(34,197,94,0.25)' }}>
+                🟢 AI Aktif
+              </div>
+            ) : (
+              <button
+                onClick={() => { setShowKeyModal(true); setKeyInputValue(geminiKey); }}
+                className="flex items-center gap-1.5 text-[10px] font-mono font-bold px-3 py-1.5 rounded-full transition-all"
+                style={geminiKey
+                  ? { background: 'rgba(34,197,94,0.12)', color: '#22c55e', border: '1px solid rgba(34,197,94,0.3)' }
+                  : { background: 'rgba(251,191,36,0.12)', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.3)' }
+                }
+              >
+                <span>{geminiKey ? '🟢' : '🔑'}</span>
+                <span>{geminiKey ? 'AI Aktif' : 'API Key Gir'}</span>
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -634,52 +748,88 @@ router ospf 1
         <div className="w-full flex flex-col gap-6">
           
           {/* PORTAL MODE TOGGLE */}
-          <div className="bg-white p-1 rounded-xl border border-slate-200 flex shadow-sm gap-1">
+          <div className="p-1 rounded-xl flex gap-1" style={{ background: 'var(--ns-panel-bg)', border: '1px solid var(--ns-border-dim)' }}>
             <button
               id="mode-portal-designer"
               onClick={() => setPortalMode('designer')}
-              className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                portalMode === 'designer'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-600 hover:bg-slate-50'
-              }`}
+              className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
+              style={portalMode === 'designer'
+                ? { background: 'linear-gradient(135deg, #0891b2 0%, #2563eb 100%)', color: '#fff', boxShadow: '0 0 14px rgba(6,182,212,0.35)' }
+                : { color: '#4b7ab0' }}
             >
               <Compass className="h-4 w-4" />
-              <span>🌐 İnteraktif Topoloji & Canlı Kurulum Portalı</span>
+              <span>🌐 İnteraktif Topoloji &amp; Canlı Kurulum Portalı</span>
             </button>
             <button
               id="mode-portal-simulation"
               onClick={() => setPortalMode('simulation')}
-              className={`flex-1 flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                portalMode === 'simulation'
-                  ? 'bg-blue-600 text-white shadow-sm'
-                  : 'text-slate-600 hover:bg-slate-50'
-              }`}
+              className="flex-1 flex items-center justify-center gap-2 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
+              style={portalMode === 'simulation'
+                ? { background: 'linear-gradient(135deg, #0891b2 0%, #2563eb 100%)', color: '#fff', boxShadow: '0 0 14px rgba(6,182,212,0.35)' }
+                : { color: '#4b7ab0' }}
             >
               <Activity className="h-4 w-4" />
-              <span>🎓 Eğitim & Akademik Simülasyonlar (5 Faz)</span>
+              <span>🎓 Eğitim &amp; Akademik Simülasyonlar (5 Faz)</span>
             </button>
           </div>
 
           {portalMode === 'simulation' ? (
             <>
+              {/* PHASE PROGRESS STEPPER */}
+              <div className="flex items-center gap-0 mb-1 px-1">
+                {[1,2,3,4,5].map((phaseNum, idx) => {
+                  const isVisited  = visitedPhases.includes(phaseNum);
+                  const isActive   = currentPhase === phaseNum;
+                  const phaseColor = isActive ? '#06b6d4' : isVisited ? '#34d399' : '#1e3a6e';
+                  const stepLabels = ["Fiziksel Altyapı","Omurga CLI","VLAN/vPC","Güvenlik & SAN","Sorun Giderme"];
+                  return (
+                    <div key={phaseNum} className="flex items-center flex-1">
+                      <button
+                        onClick={() => switchPhase(phaseNum)}
+                        className="flex flex-col items-center gap-0.5 w-8 shrink-0"
+                        title={stepLabels[idx]}
+                      >
+                        <div className="w-7 h-7 rounded-full flex items-center justify-center text-[10px] font-bold transition-all"
+                          style={{
+                            background: isActive ? 'rgba(6,182,212,0.18)' : isVisited ? 'rgba(52,211,153,0.12)' : 'rgba(6,13,31,0.8)',
+                            border: `2px solid ${phaseColor}`,
+                            color: phaseColor,
+                            boxShadow: isActive ? '0 0 10px rgba(6,182,212,0.4)' : 'none'
+                          }}
+                        >
+                          {isVisited && !isActive ? '✓' : phaseNum}
+                        </div>
+                      </button>
+                      {idx < 4 && (
+                        <div className="flex-1 h-0.5 mx-0.5 transition-all" style={{
+                          background: visitedPhases.includes(phaseNum+1) ? 'linear-gradient(90deg,#34d399,#06b6d4)' : 'rgba(30,58,110,0.6)'
+                        }} />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
               {/* PHASE TABS */}
-              <div className="bg-white p-1.5 rounded-xl border border-slate-200 grid grid-cols-5 gap-1 shadow-sm">
+              <div className="p-1.5 rounded-xl grid grid-cols-5 gap-1" style={{ background: 'rgba(6,13,31,0.7)', border: '1px solid rgba(6,182,212,0.12)' }}>
             {[1, 2, 3, 4, 5].map((phaseNum) => {
               const icons = [Layers, Network, Cpu, Shield, Activity];
               const Icon = icons[phaseNum - 1];
               const titles = ["Fiziksel", "Omurga", "Mantıksal", "Güvenlik", "Sorun Giderme"];
+              const isVisited = visitedPhases.includes(phaseNum);
               return (
                 <button
                   key={phaseNum}
                   id={`phase-tab-${phaseNum}`}
-                  onClick={() => setCurrentPhase(phaseNum)}
-                  className={`flex flex-col items-center justify-center py-2.5 rounded-lg transition-all ${
-                    currentPhase === phaseNum
-                      ? 'bg-blue-50 text-blue-600 font-bold shadow-sm'
-                      : 'text-slate-500 hover:text-slate-800 hover:bg-slate-50'
-                  }`}
+                  onClick={() => switchPhase(phaseNum)}
+                  className="flex flex-col items-center justify-center py-2.5 rounded-lg transition-all cursor-pointer relative"
+                  style={currentPhase === phaseNum
+                    ? { background: 'rgba(6,182,212,0.12)', color: '#06b6d4', fontWeight: '700', boxShadow: '0 0 10px rgba(6,182,212,0.2), inset 0 0 1px rgba(6,182,212,0.4)' }
+                    : { color: isVisited ? '#34d399' : '#4b7ab0' }}
                 >
+                  {isVisited && currentPhase !== phaseNum && (
+                    <span className="absolute top-1 right-1 text-[7px]" style={{ color: '#34d399' }}>✓</span>
+                  )}
                   <Icon className="h-4 w-4 md:h-5 md:w-5 mb-1 text-blue-600" />
                   <span className="text-[9px] md:text-xs font-semibold">{titles[phaseNum - 1]}</span>
                   <span className="text-[8px] font-mono opacity-60">Faz {phaseNum}</span>
@@ -689,20 +839,36 @@ router ospf 1
           </div>
 
           {/* ACTIVE WORKSPACE FRAME */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col min-h-[580px]">
+          <div className="rounded-2xl overflow-hidden flex flex-col min-h-[580px]" style={{ background: 'var(--ns-card-bg)', border: '1px solid var(--ns-border-dim)', boxShadow: '0 0 30px rgba(6,182,212,0.05)' }}>
             {/* Workspace Header */}
-            <div className="bg-slate-50 px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+            <div className="px-5 py-4 border-b flex items-center justify-between" style={{ background: 'var(--ns-ws-header-bg)', borderColor: 'var(--ns-border-subtle)' }}>
               <div>
-                <span className="text-xs font-mono text-blue-600 uppercase tracking-widest block font-bold">
+                <span className="text-xs font-mono uppercase tracking-widest block font-bold" style={{ color: '#06b6d4', fontFamily: 'Orbitron, monospace', fontSize: '9px', letterSpacing: '0.18em' }}>
                   {PHASE_GUIDES[currentPhase - 1].title}
                 </span>
-                <h3 className="text-base font-bold text-slate-800">
+                <h3 className="text-sm font-bold text-slate-100 mt-0.5">
                   {PHASE_GUIDES[currentPhase - 1].desc}
                 </h3>
               </div>
-              <span className="text-xs font-mono px-2.5 py-1 bg-white rounded-full text-slate-500 border border-slate-200">
-                Faz {currentPhase} / 5
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-mono px-2.5 py-1 rounded-full" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>
+                  Faz {currentPhase} / 5
+                </span>
+                {currentPhase < 5 && (
+                  <button
+                    onClick={() => switchPhase(currentPhase + 1)}
+                    className="flex items-center gap-1 text-xs font-semibold px-3 py-1 rounded-full transition-all"
+                    style={{ background: 'rgba(6,182,212,0.15)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.3)', boxShadow: '0 0 8px rgba(6,182,212,0.15)' }}
+                  >
+                    Sonraki Adım <ChevronRight className="h-3 w-3" />
+                  </button>
+                )}
+                {currentPhase === 5 && (
+                  <span className="text-xs font-semibold px-3 py-1 rounded-full" style={{ background: 'rgba(52,211,153,0.15)', color: '#34d399', border: '1px solid rgba(52,211,153,0.3)' }}>
+                    ✓ Tüm Fazlar Tamamlandı
+                  </span>
+                )}
+              </div>
             </div>
 
             {/* Workspace Content Router */}
@@ -1503,7 +1669,7 @@ router ospf 1
             </div>
 
             {/* Workspace Footer stats */}
-            <div className="bg-slate-100 px-5 py-3 border-t border-slate-200 grid grid-cols-3 gap-2 font-mono text-[10px] text-slate-500">
+            <div className="px-5 py-3 border-t grid grid-cols-3 gap-2 font-mono text-[10px]" style={{ background: 'rgba(6,13,31,0.7)', borderColor: 'rgba(6,182,212,0.1)', color: '#4b7ab0' }}>
               <div className="flex items-center gap-1.5">
                 <Zap className="h-3 w-3 text-amber-500" />
                 <span>Toplam Tahmini Güç: <strong className="text-slate-700">{(totalRUsNeeded * 140) + 300} Watt</strong></span>
@@ -1526,8 +1692,6 @@ router ospf 1
                 assets={assets}
                 updateAsset={updateAsset}
                 totalRUsNeeded={totalRUsNeeded}
-                budgetLimit={budgetLimit}
-                setBudgetLimit={setBudgetLimit}
                 budgetTier={budgetTier}
                 setBudgetTier={setBudgetTier}
                 selectedTopologyNode={selectedTopologyNode}
@@ -1544,18 +1708,18 @@ router ospf 1
         </div>
 
         {/* BOTTOM PORTION: YAPAY ZEKA AĞ DANIŞMANI (FULL WIDTH) */}
-        <div className="w-full flex flex-col bg-slate-50 border border-slate-200 rounded-2xl shadow-sm overflow-hidden max-h-[500px] mt-4">
-          
+        <div className="w-full flex flex-col rounded-2xl overflow-hidden max-h-[500px] mt-4" style={{ background: 'var(--ns-card-bg)', border: '1px solid var(--ns-border-dim)' }}>
+
           {/* Chat Header */}
-          <div className="bg-slate-100 px-4 py-3 border-b border-slate-200 flex items-center justify-between">
+          <div className="px-4 py-3 border-b flex items-center justify-between" style={{ background: 'var(--ns-chat-header-bg)', borderColor: 'var(--ns-border-dim)' }}>
             <div className="flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-blue-600 animate-pulse" />
-              <h3 className="text-xs font-bold uppercase tracking-widest font-mono text-slate-700">
-                🤖 NetSim-Architect Yapay Zeka Ağ Altyapı Asistanı
+              <div className="w-2 h-2 rounded-full bg-cyan-400 neon-pulse" />
+              <h3 className="text-xs font-bold uppercase font-mono" style={{ color: '#06b6d4', letterSpacing: '0.14em', fontFamily: 'Orbitron, monospace', fontSize: '9px' }}>
+                ◈ NetSim-Architect — AI Ağ Altyapı Asistanı
               </h3>
             </div>
-            <span className="text-[9px] font-mono bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded border border-blue-200 font-semibold">
-              Aktif Çekirdek
+            <span className="text-[8px] font-mono px-2 py-0.5 rounded-full font-bold" style={{ background: 'rgba(34,197,94,0.1)', color: '#22c55e', border: '1px solid rgba(34,197,94,0.25)' }}>
+              ● AKTİF ÇEKİRDEK
             </span>
           </div>
 
@@ -1588,7 +1752,7 @@ router ospf 1
           </div>
 
           {/* Suggestion Prompts */}
-          <div className="px-3 py-2 bg-slate-100 border-t border-slate-200 flex gap-1.5 overflow-x-auto whitespace-nowrap text-[9px] font-mono text-slate-500 scrollbar-none">
+          <div className="px-3 py-2 border-t flex gap-1.5 overflow-x-auto whitespace-nowrap text-[9px] font-mono scrollbar-none" style={{ background: 'rgba(6,13,31,0.6)', borderColor: 'rgba(6,182,212,0.1)', color: '#4b7ab0' }}>
             <button 
               onClick={() => setChatInput("LACP ve vPC komutlarını yazar mısın?")}
               className="bg-white border border-slate-200 hover:bg-slate-50 hover:text-slate-700 px-2.5 py-1 rounded shadow-sm text-slate-600 transition-all cursor-pointer"
@@ -1639,6 +1803,60 @@ router ospf 1
           <span className="text-[10px] text-slate-400">Geliştirici Barış Özyapışoğlu © 2026</span>
         </div>
       </footer>
+
+      {/* GEMINI API KEY MODAL */}
+      {showKeyModal && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4" style={{ background: 'rgba(4,12,26,0.88)', backdropFilter: 'blur(10px)' }} onClick={() => setShowKeyModal(false)}>
+          <div className="w-full max-w-md rounded-2xl overflow-hidden" style={{ background: '#0a1530', border: '1px solid rgba(6,182,212,0.35)', boxShadow: '0 0 80px rgba(6,182,212,0.2)' }} onClick={e => e.stopPropagation()}>
+            <div className="px-6 py-4" style={{ background: 'rgba(6,13,31,0.9)', borderBottom: '1px solid rgba(6,182,212,0.15)' }}>
+              <p className="text-[10px] font-mono uppercase tracking-widest mb-0.5" style={{ color: '#06b6d4' }}>Yapay Zeka Motoru</p>
+              <h3 className="text-sm font-bold" style={{ color: '#e2e8f0', fontFamily: 'Orbitron, monospace' }}>Gemini API Key</h3>
+            </div>
+            <div className="p-6 space-y-4">
+              <p className="text-xs leading-relaxed" style={{ color: '#64748b' }}>
+                Google AI Studio'dan ücretsiz API key alabilirsin:{' '}
+                <span className="font-mono" style={{ color: '#06b6d4' }}>aistudio.google.com/app/apikey</span>
+              </p>
+              <div>
+                <label className="text-[10px] font-mono uppercase tracking-wider block mb-1.5" style={{ color: '#4b7ab0' }}>API Key</label>
+                <input
+                  type="password"
+                  autoFocus
+                  value={keyInputValue}
+                  onChange={e => setKeyInputValue(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter' && keyInputValue.trim()) { setGeminiKey(keyInputValue.trim()); setShowKeyModal(false); } }}
+                  placeholder="AIzaSy..."
+                  className="w-full text-sm px-4 py-2.5 rounded-xl outline-none font-mono"
+                  style={{ background: 'rgba(6,13,31,0.8)', border: '1px solid rgba(6,182,212,0.3)', color: '#e2e8f0' }}
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { if (keyInputValue.trim()) { setGeminiKey(keyInputValue.trim()); setShowKeyModal(false); } }}
+                  className="flex-1 py-2.5 rounded-xl text-sm font-bold transition-all"
+                  style={{ background: 'linear-gradient(135deg, #0891b2, #2563eb)', color: '#fff', boxShadow: '0 0 14px rgba(6,182,212,0.3)' }}
+                >
+                  Kaydet & Aktifleştir
+                </button>
+                {geminiKey && (
+                  <button
+                    onClick={() => { setGeminiKey(''); setShowKeyModal(false); }}
+                    className="px-4 py-2.5 rounded-xl text-sm font-bold"
+                    style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171', border: '1px solid rgba(239,68,68,0.2)' }}
+                  >
+                    Sil
+                  </button>
+                )}
+              </div>
+              {geminiKey && (
+                <p className="text-[10px] font-mono text-center" style={{ color: '#22c55e' }}>
+                  ✓ Key kayıtlı — AI aktif olarak çalışıyor
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
 
     </div>
   );

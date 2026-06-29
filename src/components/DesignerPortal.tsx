@@ -1,18 +1,17 @@
 import React, { useState, useEffect } from "react";
-import { 
-  Network, Server as ServerIcon, Shield, Database, Activity, 
-  Cpu, Zap, Info, Plus, Minus, Layers, Settings, 
+import {
+  Network, Server as ServerIcon, Shield, Database, Activity,
+  Cpu, Zap, Info, Plus, Minus, Layers, Settings,
   AlertTriangle, CheckCircle2, ArrowRight, Cable, Compass, LogIn,
-  Building2, HelpCircle, Eye, EyeOff, LayoutGrid, CheckSquare
+  Building2, HelpCircle, Eye, EyeOff, LayoutGrid, CheckSquare, X, RefreshCw
 } from "lucide-react";
 import { NetworkAssets } from "../types";
+import { HARDWARE_CATALOG, HardwareCategory, CATEGORY_LABELS } from "../hardware";
 
 interface DesignerPortalProps {
   assets: NetworkAssets;
   updateAsset: (key: keyof NetworkAssets, amount: number) => void;
   totalRUsNeeded: number;
-  budgetLimit: number;
-  setBudgetLimit: (val: number) => void;
   budgetTier: 'economic' | 'medium' | 'premium';
   setBudgetTier: (val: 'economic' | 'medium' | 'premium') => void;
   selectedTopologyNode: string | null;
@@ -29,8 +28,6 @@ export default function DesignerPortal({
   assets: initialAssets,
   updateAsset: parentUpdateAsset,
   totalRUsNeeded: parentRUsNeeded,
-  budgetLimit: parentBudgetLimit,
-  setBudgetLimit: parentSetBudgetLimit,
   budgetTier: parentBudgetTier,
   setBudgetTier: parentSetBudgetTier,
   selectedTopologyNode: parentSelectedNode,
@@ -67,18 +64,49 @@ export default function DesignerPortal({
     }
   };
 
-  const [localBudgetLimit, setLocalBudgetLimit] = useState<number>(parentBudgetLimit);
   const [localBudgetTier, setLocalBudgetTier] = useState<'economic' | 'medium' | 'premium'>(parentBudgetTier);
-
-  useEffect(() => {
-    setLocalBudgetLimit(parentBudgetLimit);
-  }, [parentBudgetLimit]);
 
   useEffect(() => {
     setLocalBudgetTier(parentBudgetTier);
   }, [parentBudgetTier]);
 
   const [selectedNode, setSelectedNode] = useState<string | null>('servers'); // Default to servers to answer server connection immediately!
+
+  // Product picker state
+  const [customProducts, setCustomProducts] = useState<Partial<Record<HardwareCategory, string>>>({});
+  const [customProductsData, setCustomProductsData] = useState<Record<string, { model: string; ports: string; desc: string; whySelected: string }>>({});
+  const [pickerCategory, setPickerCategory] = useState<HardwareCategory | null>(null);
+  const [pickerSearch, setPickerSearch] = useState<string>('');
+  const [aiSearchResult, setAiSearchResult] = useState<{ brand: string; model: string; ports: string; throughput?: string; desc: string; whySelected: string } | null>(null);
+  const [isSearchingAi, setIsSearchingAi] = useState<boolean>(false);
+
+  const searchProductWithAi = async () => {
+    if (!pickerSearch.trim()) return;
+    setIsSearchingAi(true);
+    setAiSearchResult(null);
+    try {
+      const apiKey = localStorage.getItem('ns-gemini-key') ?? '';
+      const res = await fetch('/api/product-specs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ productName: pickerSearch.trim(), category: pickerCategory, apiKey })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAiSearchResult(data);
+      } else {
+        const err = await res.json();
+        if (err.error === 'API_KEY_MISSING' || err.error === 'API_KEY_INVALID') {
+          setAiSearchResult(null);
+          alert(err.error === 'API_KEY_INVALID'
+            ? 'Girilen API key geçersiz. Sağ üstteki "API Key Gir" butonundan doğru key\'i tekrar gir.'
+            : 'AI arama için önce sağ üstteki "API Key Gir" butonuna tıklayarak Gemini API key\'ini gir.'
+          );
+        }
+      }
+    } catch {}
+    setIsSearchingAi(false);
+  };
 
   // Hardware models based on budget tier and redundancy settings
   const getHardwareConfig = () => {
@@ -271,7 +299,34 @@ export default function DesignerPortal({
     }
   };
 
-  const hw = getHardwareConfig();
+  const baseHw = getHardwareConfig();
+
+  // Merge custom product overrides with tier-based defaults
+  const applyCustomOverride = (cat: HardwareCategory, base: { model: string; price: number; desc: string; ports?: string; whySelected?: string }) => {
+    const pid = customProducts[cat];
+    if (!pid) return base;
+    // Check if it's an AI-found custom product
+    if (pid.startsWith('ai:') && customProductsData[pid]) {
+      const d = customProductsData[pid];
+      return { model: d.model, price: 0, ports: d.ports, desc: d.desc, whySelected: d.whySelected };
+    }
+    const p = HARDWARE_CATALOG.find(x => x.id === pid);
+    if (!p) return base;
+    return { model: `${p.brand} ${p.model}`, price: p.price, ports: p.ports, desc: p.desc, whySelected: p.whySelected };
+  };
+
+  const hw = {
+    router:   applyCustomOverride('router',   baseHw.router),
+    firewall: applyCustomOverride('firewall', baseHw.firewall),
+    spine:    applyCustomOverride('spine',    baseHw.spine),
+    userLeaf: applyCustomOverride('userLeaf', baseHw.userLeaf),
+    poeLeaf:  applyCustomOverride('poeLeaf',  baseHw.poeLeaf),
+    otLeaf:   applyCustomOverride('otLeaf',   baseHw.otLeaf),
+    server:   applyCustomOverride('server',   baseHw.server),
+    storage:  applyCustomOverride('storage',  baseHw.storage),
+    pdu:      applyCustomOverride('pdu',      baseHw.pdu),
+    rack:     applyCustomOverride('rack',     baseHw.rack),
+  };
 
   // Dynamic Switch & Rack calculation based on user variables
   const routerQty = isRedundant ? 2 : 1;
@@ -327,51 +382,47 @@ export default function DesignerPortal({
     patchPanelCosts +
     laborCost;
 
-  const isOverBudget = totalCost > localBudgetLimit;
-  const budgetUsagePercent = Math.min(100, Math.round((totalCost / localBudgetLimit) * 100));
-
-  // Sync state to parent budget limit if changed (guarded to avoid unneeded renders)
+  // Sync tier to parent when changed
   useEffect(() => {
     try {
-      if (parentBudgetLimit !== localBudgetLimit) {
-        parentSetBudgetLimit(localBudgetLimit);
-      }
       if (parentBudgetTier !== localBudgetTier) {
         parentSetBudgetTier(localBudgetTier);
       }
     } catch (e) {}
-  }, [localBudgetLimit, localBudgetTier, parentBudgetLimit, parentBudgetTier]);
+  }, [localBudgetTier, parentBudgetTier]);
 
   return (
-    <div className="flex flex-col flex-1 bg-white">
-      
+    <>
+    <div className="flex flex-col flex-1" style={{ background: '#070f24' }}>
+
       {/* 1. PORTAL HEADER SECTION */}
-      <div className="bg-slate-900 text-white px-6 py-5 border-b border-slate-800 flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-md">
+      <div className="text-white px-6 py-5 border-b flex flex-col md:flex-row md:items-center justify-between gap-4" style={{ background: 'linear-gradient(135deg, #060d1f 0%, #0a1530 100%)', borderColor: 'rgba(6,182,212,0.2)' }}>
         <div className="flex items-center gap-3">
-          <div className="p-2.5 bg-blue-600 rounded-xl text-white shadow-lg animate-pulse">
+          <div className="p-2.5 rounded-xl text-white" style={{ background: 'linear-gradient(135deg, #0891b2, #1d4ed8)', boxShadow: '0 0 16px rgba(6,182,212,0.4)' }}>
             <Compass className="h-6 w-6" />
           </div>
           <div>
-            <span className="text-[10px] font-mono text-blue-400 uppercase tracking-widest block font-bold">
-              YENİ NESİL İNTERAKTİF FİZİKSEL TOPOLOJİ VE CANLI KURULUM PORTALI
+            <span className="text-[10px] font-mono uppercase tracking-widest block font-bold" style={{ color: '#06b6d4', letterSpacing: '0.16em', fontFamily: 'Orbitron, monospace', fontSize: '8px' }}>
+              ◈ YENİ NESİL İNTERAKTİF TOPOLOJİ VE CANLI KURULUM PORTALI
             </span>
-            <h3 className="text-lg font-extrabold tracking-tight">
+            <h3 className="text-lg font-extrabold tracking-tight" style={{ fontFamily: 'Orbitron, monospace', background: 'linear-gradient(135deg, #e2e8f0, #06b6d4)', WebkitBackgroundClip: 'text', WebkitTextFillColor: 'transparent', backgroundClip: 'text' }}>
               Screws-to-Code: Akıllı Altyapı Mimarı
             </h3>
-            <p className="text-xs text-slate-400 mt-0.5">
+            <p className="text-xs mt-0.5" style={{ color: '#4b7ab0' }}>
               Cisco Packet Tracer kalitesinde interaktif şema, kat bazlı yerleşim, dinamik kablolama ve sıfırdan anlama rehberi
             </p>
           </div>
         </div>
 
         {/* Global Controls: Hardware Class & Redundancy */}
-        <div className="flex flex-wrap items-center gap-2.5 bg-slate-800/80 p-2 rounded-xl border border-slate-700/60 shadow-inner">
+        <div className="flex flex-wrap items-center gap-2.5 p-2 rounded-xl" style={{ background: 'rgba(6,13,31,0.8)', border: '1px solid rgba(6,182,212,0.15)' }}>
           <div className="flex items-center gap-1">
-            <span className="text-[10px] font-mono text-slate-400 font-bold px-1.5">Donanım Kalitesi:</span>
+            <span className="text-[10px] font-mono font-bold px-1.5" style={{ color: '#4b7ab0' }}>Donanım Kalitesi:</span>
             <select
               value={localBudgetTier}
               onChange={(e) => setLocalBudgetTier(e.target.value as any)}
-              className="text-xs bg-slate-900 border border-slate-700 text-white rounded px-2 py-1 font-semibold focus:outline-none focus:border-blue-500 cursor-pointer"
+              className="text-xs rounded px-2 py-1 font-semibold cursor-pointer"
+              style={{ background: '#0a1530', border: '1px solid rgba(6,182,212,0.2)', color: '#e2e8f0', outline: 'none' }}
             >
               <option value="economic">Ekonomik (SME / MikroTik / Ubiquiti)</option>
               <option value="medium">Orta Sınıf (Kurumsal Cisco / Fortinet)</option>
@@ -379,16 +430,16 @@ export default function DesignerPortal({
             </select>
           </div>
 
-          <div className="h-4 w-[1px] bg-slate-700" />
+          <div className="h-4 w-[1px]" style={{ background: 'rgba(6,182,212,0.2)' }} />
 
           {/* Redundancy Switcher */}
           <button
             onClick={() => setIsRedundant(!isRedundant)}
-            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-bold transition-all cursor-pointer ${
-              isRedundant 
-                ? 'bg-emerald-600 text-white shadow-md' 
-                : 'bg-amber-600 text-white shadow-md'
-            }`}
+            className="flex items-center gap-1.5 px-3 py-1 rounded text-xs font-bold transition-all cursor-pointer"
+            style={isRedundant
+              ? { background: 'linear-gradient(135deg, #065f46, #047857)', color: '#6ee7b7', border: '1px solid rgba(52,211,153,0.3)', boxShadow: '0 0 10px rgba(52,211,153,0.2)' }
+              : { background: 'linear-gradient(135deg, #78350f, #92400e)', color: '#fcd34d', border: '1px solid rgba(251,191,36,0.3)', boxShadow: '0 0 10px rgba(251,191,36,0.15)' }
+            }
           >
             <Shield className="h-3 w-3" />
             {isRedundant ? 'Yedekli Yapı (Redundant HA)' : 'Yedeksiz Yapı (Standby)'}
@@ -397,33 +448,33 @@ export default function DesignerPortal({
       </div>
 
       {/* 2. DYNAMIC REAL-TIME INVENTORY EDITOR PANEL */}
-      <div className="bg-slate-50 border-b border-slate-200 p-5 shadow-sm">
+      <div className="border-b p-5" style={{ background: 'rgba(6,13,31,0.7)', borderColor: 'rgba(6,182,212,0.12)' }}>
         <div className="max-w-7xl mx-auto">
-          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-4 border-b border-slate-200 pb-2.5">
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-3 mb-4 border-b pb-2.5" style={{ borderColor: 'rgba(6,182,212,0.1)' }}>
             <div>
-              <h4 className="text-xs font-mono font-bold text-slate-700 uppercase tracking-widest flex items-center gap-2">
-                <Settings className="h-4 w-4 text-blue-600" /> ENVANTER VE BİNA FİZİKSEL YAPISINI ÖZELLEŞTİRİN
+              <h4 className="text-xs font-mono font-bold uppercase tracking-widest flex items-center gap-2" style={{ color: '#06b6d4', fontFamily: 'Orbitron, monospace', fontSize: '9px', letterSpacing: '0.14em' }}>
+                <Settings className="h-4 w-4" style={{ color: '#06b6d4' }} /> ◈ ENVANTER VE BİNA FİZİKSEL YAPISINI ÖZELLEŞTİRİN
               </h4>
-              <p className="text-[11px] text-slate-500 font-sans mt-0.5">
+              <p className="text-[11px] font-sans mt-0.5" style={{ color: '#4b7ab0' }}>
                 Kendi bilgisayar, kamera, sunucu ve kat adetlerinizi belirleyin. Ağ haritası ve kablo bacakları anında yeniden çizilecektir!
               </p>
             </div>
 
             {/* Floors and Building Configuration */}
-            <div className="flex items-center gap-3 bg-white px-3 py-1.5 rounded-lg border border-slate-200 shadow-sm">
-              <span className="text-xs font-bold text-slate-700 flex items-center gap-1.5">
-                <Building2 className="h-4 w-4 text-indigo-500" /> Bina Fiziksel Yapısı:
+            <div className="flex items-center gap-3 px-3 py-1.5 rounded-lg" style={{ background: 'rgba(6,13,31,0.8)', border: '1px solid rgba(6,182,212,0.15)' }}>
+              <span className="text-xs font-bold flex items-center gap-1.5" style={{ color: '#94a3b8' }}>
+                <Building2 className="h-4 w-4" style={{ color: '#818cf8' }} /> Bina Fiziksel Yapısı:
               </span>
               <div className="flex gap-1.5">
                 {[1, 2, 3].map((floor) => (
                   <button
                     key={floor}
                     onClick={() => setNumFloors(floor)}
-                    className={`px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer ${
-                      numFloors === floor 
-                        ? 'bg-blue-600 text-white shadow-sm' 
-                        : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-                    }`}
+                    className="px-3 py-1 text-xs font-bold rounded-md transition-all cursor-pointer"
+                    style={numFloors === floor
+                      ? { background: 'linear-gradient(135deg, #0891b2, #1d4ed8)', color: '#e0f7fa', boxShadow: '0 0 10px rgba(6,182,212,0.3)', border: '1px solid rgba(6,182,212,0.4)' }
+                      : { background: 'rgba(15,30,61,0.8)', color: '#64748b', border: '1px solid rgba(6,182,212,0.1)' }
+                    }
                   >
                     {floor} Katlı Bina
                   </button>
@@ -435,85 +486,85 @@ export default function DesignerPortal({
           {/* Asset Incrementer Grid */}
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3">
             {/* PCs */}
-            <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-              <span className="text-[10px] text-slate-500 font-bold block mb-1">💻 Ofis Bilgisayarları</span>
+            <div className="p-2.5 rounded-xl flex flex-col justify-between" style={{ background: 'rgba(15,30,61,0.8)', border: '1px solid rgba(6,182,212,0.12)' }}>
+              <span className="text-[10px] font-bold block mb-1" style={{ color: '#4b7ab0' }}>💻 Ofis Bilgisayarları</span>
               <div className="flex items-center justify-between">
-                <span className="font-mono text-base font-bold text-slate-800">{localAssets.pcs} adet</span>
+                <span className="font-mono text-base font-bold" style={{ color: '#e2e8f0' }}>{localAssets.pcs} adet</span>
                 <div className="flex gap-1">
-                  <button onClick={() => updateLocalAsset('pcs', -2)} className="w-5 h-5 bg-slate-100 hover:bg-slate-200 rounded text-xs flex items-center justify-center font-extrabold text-slate-700">-</button>
-                  <button onClick={() => updateLocalAsset('pcs', 2)} className="w-5 h-5 bg-slate-100 hover:bg-slate-200 rounded text-xs flex items-center justify-center font-extrabold text-slate-700">+</button>
+                  <button onClick={() => updateLocalAsset('pcs', -2)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>-</button>
+                  <button onClick={() => updateLocalAsset('pcs', 2)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>+</button>
                 </div>
               </div>
             </div>
 
             {/* IP Phones */}
-            <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-              <span className="text-[10px] text-slate-500 font-bold block mb-1">📞 IP Telefonlar (VoIP)</span>
+            <div className="p-2.5 rounded-xl flex flex-col justify-between" style={{ background: 'rgba(15,30,61,0.8)', border: '1px solid rgba(6,182,212,0.12)' }}>
+              <span className="text-[10px] font-bold block mb-1" style={{ color: '#4b7ab0' }}>📞 IP Telefonlar (VoIP)</span>
               <div className="flex items-center justify-between">
-                <span className="font-mono text-base font-bold text-slate-800">{localAssets.ipPhones} adet</span>
+                <span className="font-mono text-base font-bold" style={{ color: '#e2e8f0' }}>{localAssets.ipPhones} adet</span>
                 <div className="flex gap-1">
-                  <button onClick={() => updateLocalAsset('ipPhones', -2)} className="w-5 h-5 bg-slate-100 hover:bg-slate-200 rounded text-xs flex items-center justify-center font-extrabold text-slate-700">-</button>
-                  <button onClick={() => updateLocalAsset('ipPhones', 2)} className="w-5 h-5 bg-slate-100 hover:bg-slate-200 rounded text-xs flex items-center justify-center font-extrabold text-slate-700">+</button>
+                  <button onClick={() => updateLocalAsset('ipPhones', -2)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>-</button>
+                  <button onClick={() => updateLocalAsset('ipPhones', 2)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>+</button>
                 </div>
               </div>
             </div>
 
             {/* IP Cameras */}
-            <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between ring-2 ring-amber-500/20">
-              <span className="text-[10px] text-amber-700 font-bold block mb-1">📹 IP Güvenlik Kameraları</span>
+            <div className="p-2.5 rounded-xl flex flex-col justify-between" style={{ background: 'rgba(15,30,61,0.8)', border: '1px solid rgba(251,191,36,0.2)', boxShadow: '0 0 8px rgba(251,191,36,0.05)' }}>
+              <span className="text-[10px] font-bold block mb-1" style={{ color: '#fbbf24' }}>📹 IP Güvenlik Kameraları</span>
               <div className="flex items-center justify-between">
-                <span className="font-mono text-base font-bold text-slate-800">{localAssets.cameras} adet</span>
+                <span className="font-mono text-base font-bold" style={{ color: '#e2e8f0' }}>{localAssets.cameras} adet</span>
                 <div className="flex gap-1">
-                  <button onClick={() => updateLocalAsset('cameras', -1)} className="w-5 h-5 bg-amber-50 hover:bg-amber-100 rounded text-xs flex items-center justify-center font-extrabold text-amber-800">-</button>
-                  <button onClick={() => updateLocalAsset('cameras', 1)} className="w-5 h-5 bg-amber-50 hover:bg-amber-100 rounded text-xs flex items-center justify-center font-extrabold text-amber-800">+</button>
+                  <button onClick={() => updateLocalAsset('cameras', -1)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(251,191,36,0.1)', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.25)' }}>-</button>
+                  <button onClick={() => updateLocalAsset('cameras', 1)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(251,191,36,0.1)', color: '#fbbf24', border: '1px solid rgba(251,191,36,0.25)' }}>+</button>
                 </div>
               </div>
             </div>
 
             {/* Wi-Fi APs */}
-            <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-              <span className="text-[10px] text-slate-500 font-bold block mb-1">📶 Wi-Fi Access Pointler</span>
+            <div className="p-2.5 rounded-xl flex flex-col justify-between" style={{ background: 'rgba(15,30,61,0.8)', border: '1px solid rgba(6,182,212,0.12)' }}>
+              <span className="text-[10px] font-bold block mb-1" style={{ color: '#4b7ab0' }}>📶 Wi-Fi Access Pointler</span>
               <div className="flex items-center justify-between">
-                <span className="font-mono text-base font-bold text-slate-800">{localAssets.wifiAPs} adet</span>
+                <span className="font-mono text-base font-bold" style={{ color: '#e2e8f0' }}>{localAssets.wifiAPs} adet</span>
                 <div className="flex gap-1">
-                  <button onClick={() => updateLocalAsset('wifiAPs', -1)} className="w-5 h-5 bg-slate-100 hover:bg-slate-200 rounded text-xs flex items-center justify-center font-extrabold text-slate-700">-</button>
-                  <button onClick={() => updateLocalAsset('wifiAPs', 1)} className="w-5 h-5 bg-slate-100 hover:bg-slate-200 rounded text-xs flex items-center justify-center font-extrabold text-slate-700">+</button>
+                  <button onClick={() => updateLocalAsset('wifiAPs', -1)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>-</button>
+                  <button onClick={() => updateLocalAsset('wifiAPs', 1)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>+</button>
                 </div>
               </div>
             </div>
 
             {/* Hypervisor Servers */}
-            <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between ring-2 ring-purple-500/20">
-              <span className="text-[10px] text-purple-700 font-bold block mb-1">🖥️ Fiziksel Sunucular</span>
+            <div className="p-2.5 rounded-xl flex flex-col justify-between" style={{ background: 'rgba(15,30,61,0.8)', border: '1px solid rgba(139,92,246,0.25)', boxShadow: '0 0 8px rgba(139,92,246,0.06)' }}>
+              <span className="text-[10px] font-bold block mb-1" style={{ color: '#a78bfa' }}>🖥️ Fiziksel Sunucular</span>
               <div className="flex items-center justify-between">
-                <span className="font-mono text-base font-bold text-slate-800">{localAssets.servers} adet</span>
+                <span className="font-mono text-base font-bold" style={{ color: '#e2e8f0' }}>{localAssets.servers} adet</span>
                 <div className="flex gap-1">
-                  <button onClick={() => updateLocalAsset('servers', -1)} className="w-5 h-5 bg-purple-50 hover:bg-purple-100 rounded text-xs flex items-center justify-center font-extrabold text-purple-800">-</button>
-                  <button onClick={() => updateLocalAsset('servers', 1)} className="w-5 h-5 bg-purple-50 hover:bg-purple-100 rounded text-xs flex items-center justify-center font-extrabold text-purple-800">+</button>
+                  <button onClick={() => updateLocalAsset('servers', -1)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(139,92,246,0.12)', color: '#a78bfa', border: '1px solid rgba(139,92,246,0.3)' }}>-</button>
+                  <button onClick={() => updateLocalAsset('servers', 1)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(139,92,246,0.12)', color: '#a78bfa', border: '1px solid rgba(139,92,246,0.3)' }}>+</button>
                 </div>
               </div>
             </div>
 
             {/* SAN Storage */}
-            <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between">
-              <span className="text-[10px] text-slate-500 font-bold block mb-1">💾 iSCSI SAN Depolama</span>
+            <div className="p-2.5 rounded-xl flex flex-col justify-between" style={{ background: 'rgba(15,30,61,0.8)', border: '1px solid rgba(6,182,212,0.12)' }}>
+              <span className="text-[10px] font-bold block mb-1" style={{ color: '#4b7ab0' }}>💾 iSCSI SAN Depolama</span>
               <div className="flex items-center justify-between">
-                <span className="font-mono text-base font-bold text-slate-800">{localAssets.sanStorages} adet</span>
+                <span className="font-mono text-base font-bold" style={{ color: '#e2e8f0' }}>{localAssets.sanStorages} adet</span>
                 <div className="flex gap-1">
-                  <button onClick={() => updateLocalAsset('sanStorages', -1)} className="w-5 h-5 bg-slate-100 hover:bg-slate-200 rounded text-xs flex items-center justify-center font-extrabold text-slate-700">-</button>
-                  <button onClick={() => updateLocalAsset('sanStorages', 1)} className="w-5 h-5 bg-slate-100 hover:bg-slate-200 rounded text-xs flex items-center justify-center font-extrabold text-slate-700">+</button>
+                  <button onClick={() => updateLocalAsset('sanStorages', -1)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>-</button>
+                  <button onClick={() => updateLocalAsset('sanStorages', 1)} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>+</button>
                 </div>
               </div>
             </div>
 
             {/* PLCs & CNCs */}
-            <div className="bg-white p-2.5 rounded-xl border border-slate-200 shadow-sm flex flex-col justify-between ring-2 ring-emerald-500/20">
-              <span className="text-[10px] text-emerald-700 font-bold block mb-1">⚙️ Endüstriyel PLC / CNC</span>
+            <div className="p-2.5 rounded-xl flex flex-col justify-between" style={{ background: 'rgba(15,30,61,0.8)', border: '1px solid rgba(52,211,153,0.2)', boxShadow: '0 0 8px rgba(52,211,153,0.04)' }}>
+              <span className="text-[10px] font-bold block mb-1" style={{ color: '#34d399' }}>⚙️ Endüstriyel PLC / CNC</span>
               <div className="flex items-center justify-between">
-                <span className="font-mono text-base font-bold text-slate-800">{localAssets.plcs + localAssets.cncs} adet</span>
+                <span className="font-mono text-base font-bold" style={{ color: '#e2e8f0' }}>{localAssets.plcs + localAssets.cncs} adet</span>
                 <div className="flex gap-1">
-                  <button onClick={() => { updateLocalAsset('plcs', -1); updateLocalAsset('cncs', -1); }} className="w-5 h-5 bg-emerald-50 hover:bg-emerald-100 rounded text-xs flex items-center justify-center font-extrabold text-emerald-800">-</button>
-                  <button onClick={() => { updateLocalAsset('plcs', 1); updateLocalAsset('cncs', 1); }} className="w-5 h-5 bg-emerald-50 hover:bg-emerald-100 rounded text-xs flex items-center justify-center font-extrabold text-emerald-800">+</button>
+                  <button onClick={() => { updateLocalAsset('plcs', -1); updateLocalAsset('cncs', -1); }} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(52,211,153,0.1)', color: '#34d399', border: '1px solid rgba(52,211,153,0.25)' }}>-</button>
+                  <button onClick={() => { updateLocalAsset('plcs', 1); updateLocalAsset('cncs', 1); }} className="w-5 h-5 rounded text-xs flex items-center justify-center font-extrabold cursor-pointer" style={{ background: 'rgba(52,211,153,0.1)', color: '#34d399', border: '1px solid rgba(52,211,153,0.25)' }}>+</button>
                 </div>
               </div>
             </div>
@@ -522,47 +573,33 @@ export default function DesignerPortal({
       </div>
 
       {/* 3. SUB TABS BAR */}
-      <div className="bg-slate-100 px-5 py-3 border-b border-slate-200 flex gap-2 overflow-x-auto whitespace-nowrap scrollbar-none">
-        <button
-          onClick={() => setDesignerSubTab('topology')}
-          className={`flex items-center gap-1.5 py-2 px-4 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-            designerSubTab === 'topology' ? 'bg-white border border-slate-200 text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <Network className="h-4 w-4 text-blue-600" />
-          🕸️ İnteraktif Katlı Ağ Topolojisi
-        </button>
-        <button
-          onClick={() => setDesignerSubTab('budget')}
-          className={`flex items-center gap-1.5 py-2 px-4 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-            designerSubTab === 'budget' ? 'bg-white border border-slate-200 text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <Zap className="h-4 w-4 text-amber-500 animate-bounce" />
-          💵 Proje BOM & Bütçe Analizi
-        </button>
-        <button
-          onClick={() => setDesignerSubTab('components')}
-          className={`flex items-center gap-1.5 py-2 px-4 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-            designerSubTab === 'components' ? 'bg-white border border-slate-200 text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <Layers className="h-4 w-4 text-indigo-500" />
-          📖 PoE & ToR Neden Seçildi? (Sıfırdan Öğrenim)
-        </button>
-        <button
-          onClick={() => setDesignerSubTab('checklist')}
-          className={`flex items-center gap-1.5 py-2 px-4 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-            designerSubTab === 'checklist' ? 'bg-white border border-slate-200 text-blue-600 shadow-sm' : 'text-slate-600 hover:text-slate-900'
-          }`}
-        >
-          <CheckSquare className="h-4 w-4 text-emerald-500" />
-          🛠️ Adım Adım Fiziksel Kurulum Rehberi
-        </button>
+      <div className="px-5 py-3 border-b flex gap-2 overflow-x-auto whitespace-nowrap scrollbar-none" style={{ background: 'rgba(6,13,31,0.9)', borderColor: 'rgba(6,182,212,0.15)' }}>
+        {([
+          { key: 'topology', icon: <Network className="h-4 w-4" />, label: '🕸️ İnteraktif Katlı Ağ Topolojisi', color: '#06b6d4' },
+          { key: 'budget', icon: <Zap className="h-4 w-4" />, label: '💵 Proje BOM & Bütçe Analizi', color: '#fbbf24' },
+          { key: 'components', icon: <Layers className="h-4 w-4" />, label: '📖 PoE & ToR Neden Seçildi?', color: '#818cf8' },
+          { key: 'checklist', icon: <CheckSquare className="h-4 w-4" />, label: '🛠️ Fiziksel Kurulum Rehberi', color: '#34d399' },
+        ] as const).map(({ key, icon, label, color }) => {
+          const active = designerSubTab === key;
+          return (
+            <button
+              key={key}
+              onClick={() => setDesignerSubTab(key as any)}
+              className="flex items-center gap-1.5 py-2 px-4 rounded-xl text-xs font-bold transition-all cursor-pointer"
+              style={active
+                ? { background: 'rgba(6,182,212,0.1)', color, border: `1px solid ${color}40`, boxShadow: `0 0 10px ${color}25` }
+                : { color: '#4b7ab0', background: 'transparent', border: '1px solid transparent' }
+              }
+            >
+              <span style={{ color: active ? color : '#3b6090' }}>{icon}</span>
+              {label}
+            </button>
+          );
+        })}
       </div>
 
       {/* 4. MAIN DYNAMIC WORKSPACE */}
-      <div className="p-6 flex-1 bg-slate-50">
+      <div className="p-6 flex-1" style={{ background: '#070f24' }}>
         
         {designerSubTab === 'topology' && (() => {
           // Generate individual endpoint devices based on the local assets
@@ -883,27 +920,27 @@ export default function DesignerPortal({
             <div className="flex flex-col gap-6 w-full">
               
               {/* TOPOLOGY CANVAS CARD (FULL SCREEN WIDTH) */}
-              <div className="w-full bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex flex-col">
-                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-4 border-b border-slate-100 pb-4">
+              <div className="w-full rounded-2xl p-5 flex flex-col" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.15)' }}>
+                <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-4 border-b pb-4" style={{ borderColor: 'rgba(6,182,212,0.12)' }}>
                   <div>
-                    <span className="text-[10px] font-mono text-indigo-600 uppercase font-bold tracking-widest block">
-                      CISCO PACKET TRACER STANDARTLARINDA PROFESYONEL VE NET ŞEMA
+                    <span className="text-[10px] font-mono uppercase font-bold tracking-widest block" style={{ color: '#06b6d4', fontFamily: 'Orbitron, monospace', fontSize: '8px', letterSpacing: '0.18em' }}>
+                      ◈ CISCO PACKET TRACER STANDARTLARINDA PROFESYONEL VE NET ŞEMA
                     </span>
-                    <h4 className="text-lg font-extrabold text-slate-800 flex items-center gap-1.5 mt-0.5">
+                    <h4 className="text-lg font-extrabold flex items-center gap-1.5 mt-0.5" style={{ color: '#e2e8f0', fontFamily: 'Orbitron, monospace', fontSize: '14px' }}>
                       🏢 Cisco Tarzı İnteraktif Altyapı & Kablolama Şeması ({numFloors} Katlı Sistem)
                     </h4>
-                    <p className="text-xs text-slate-500 mt-1 max-w-4xl leading-relaxed">
-                      Bu şema, envanterinizdeki tüm donanımları ve her bir bilgisayar, IP telefon, yazıcı, kamera, AP, PLC ve sunucuyu **tek tek ayrı birer düğüm (node) olarak** çizmektedir. Cihazlar arasındaki bağlantı bacakları (portlar), VLAN kimlikleri, IP adresleri ve kablo türleri Cisco standartlarına uygun olarak görselleştirilmiştir. 
-                      <strong className="text-slate-700 ml-1">Standby/Yedek cihazlar açıkça işaretlenmiştir. Cihazlara tıklayarak detaylı kurulum kılavuzunu altta görebilirsiniz.</strong>
+                    <p className="text-xs mt-1 max-w-4xl leading-relaxed" style={{ color: '#4b7ab0' }}>
+                      Bu şema, envanterinizdeki tüm donanımları ve her bir bilgisayar, IP telefon, yazıcı, kamera, AP, PLC ve sunucuyu **tek tek ayrı birer düğüm (node) olarak** çizmektedir. Cihazlar arasındaki bağlantı bacakları (portlar), VLAN kimlikleri, IP adresleri ve kablo türleri Cisco standartlarına uygun olarak görselleştirilmiştir.
+                      <strong className="ml-1" style={{ color: '#94a3b8' }}>Standby/Yedek cihazlar açıkça işaretlenmiştir. Cihazlara tıklayarak detaylı kurulum kılavuzunu altta görebilirsiniz.</strong>
                     </p>
                   </div>
                 </div>
 
                 {/* VISUAL BLUEPRINT ENVIRONMENT */}
-                <div className="relative border border-slate-200 rounded-2xl bg-slate-50 shadow-md p-4 overflow-x-auto select-none">
-                  
-                  {/* Subtle Grid overlay for network planning board feeling (Light Edition) */}
-                  <div className="absolute inset-0 bg-[linear-gradient(to_right,#e2e8f0_1px,transparent_1px),linear-gradient(to_bottom,#e2e8f0_1px,transparent_1px)] bg-[size:30px_30px] opacity-80 pointer-events-none" />
+                <div className="relative rounded-2xl p-4 overflow-x-auto select-none" style={{ background: '#060d1f', border: '1px solid rgba(6,182,212,0.2)', boxShadow: '0 0 30px rgba(6,182,212,0.06)' }}>
+
+                  {/* Cyber grid overlay */}
+                  <div className="absolute inset-0 pointer-events-none" style={{ backgroundImage: 'linear-gradient(rgba(6,182,212,0.04) 1px, transparent 1px), linear-gradient(90deg, rgba(6,182,212,0.04) 1px, transparent 1px)', backgroundSize: '30px 30px' }} />
 
                   {/* Main SVG Vector Canvas containing connections & lines */}
                   <svg width="1530" height="800" className="relative z-10 block">
@@ -1149,7 +1186,7 @@ export default function DesignerPortal({
                 </div>
 
                 {/* COLOR-CODED CABLES LEGEND (Cisco Packet Tracer Standard) */}
-                <div className="bg-slate-100 border border-slate-200 p-3.5 rounded-xl mt-4 grid grid-cols-2 md:grid-cols-5 gap-3.5 text-xs font-mono">
+                <div className="p-3.5 rounded-xl mt-4 grid grid-cols-2 md:grid-cols-5 gap-3.5 text-xs font-mono" style={{ background: 'rgba(6,13,31,0.7)', border: '1px solid rgba(6,182,212,0.12)' }}>
                   <div className="flex items-center gap-2">
                     <span className="w-3 h-3 rounded-full bg-blue-500 shadow-sm shrink-0" />
                     <div>
@@ -1193,15 +1230,15 @@ export default function DesignerPortal({
               <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 w-full">
                 
                 {/* Selected Node Interface Port Config (7 cols) */}
-                <div className="xl:col-span-7 bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+                <div className="xl:col-span-7 rounded-2xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                   <div>
-                    <h4 className="text-xs font-mono font-bold text-slate-700 uppercase tracking-widest mb-3 border-b border-slate-200 pb-2 flex items-center gap-1.5">
-                      <Settings className="h-4 w-4 text-blue-600 animate-spin" /> ⚙️ SEÇİLEN PORT VE VLAN YAPILANDIRMASI (CISCO IOS STYLE)
+                    <h4 className="text-xs font-mono font-bold uppercase tracking-widest mb-3 border-b pb-2 flex items-center gap-1.5" style={{ color: '#06b6d4', fontFamily: 'Orbitron, monospace', fontSize: '8px', letterSpacing: '0.13em', borderColor: 'rgba(6,182,212,0.15)' }}>
+                      <Settings className="h-4 w-4 animate-spin" style={{ color: '#06b6d4' }} /> ◈ SEÇİLEN PORT VE VLAN YAPILANDIRMASI (CISCO IOS STYLE)
                     </h4>
 
                     {activeNodeDetails ? (
                       <div className="space-y-4">
-                        <div className="flex justify-between items-center bg-slate-900 text-white p-3.5 rounded-xl border border-slate-800">
+                        <div className="flex justify-between items-center p-3.5 rounded-xl" style={{ background: 'rgba(6,13,31,0.9)', border: '1px solid rgba(6,182,212,0.2)' }}>
                           <div>
                             <span className="text-[10px] font-mono text-indigo-400 block">SEÇİLEN CİHAZ VE ROLÜ</span>
                             <strong className="text-sm font-extrabold tracking-wider block mt-0.5">{activeNodeDetails.name}</strong>
@@ -1258,25 +1295,25 @@ export default function DesignerPortal({
                         </div>
 
                         <div>
-                          <strong className="text-slate-800 block text-xs">Donanım Analizi & Amaç:</strong>
-                          <p className="text-xs text-slate-500 mt-1 leading-relaxed">
+                          <strong className="block text-xs" style={{ color: '#e2e8f0' }}>Donanım Analizi & Amaç:</strong>
+                          <p className="text-xs mt-1 leading-relaxed" style={{ color: '#94a3b8' }}>
                             {activeNodeDetails.desc}
                           </p>
                         </div>
                       </div>
                     ) : (
-                      <div className="flex flex-col items-center justify-center p-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-300">
-                        <Compass className="h-8 w-8 text-slate-300 mb-2 animate-bounce" />
-                        <strong className="text-slate-600 block text-xs">İnteraktif Port Dedektörü Aktif!</strong>
-                        <p className="text-[11px] text-slate-400 mt-1 max-w-[280px]">
+                      <div className="flex flex-col items-center justify-center p-8 text-center rounded-xl" style={{ background: 'rgba(6,13,31,0.6)', border: '1px dashed rgba(6,182,212,0.2)' }}>
+                        <Compass className="h-8 w-8 mb-2 animate-bounce" style={{ color: 'rgba(6,182,212,0.35)' }} />
+                        <strong className="block text-xs" style={{ color: '#94a3b8' }}>İnteraktif Port Dedektörü Aktif!</strong>
+                        <p className="text-[11px] mt-1 max-w-[280px]" style={{ color: '#475569' }}>
                           Cisco şemasındaki herhangi bir bilgisayara, switch'e, kameraya veya telefona tıklayarak **o cihazın bacak bağlantılarını, VLAN numaralarını ve Cisco port CLI komutlarını** anında burada inceleyin!
                         </p>
                       </div>
                     )}
                   </div>
 
-                  <div className="mt-4 bg-indigo-50 border border-indigo-100 p-3 rounded-xl text-[11px] text-indigo-800 flex items-start gap-2 font-mono">
-                    <Info className="h-4 w-4 text-indigo-600 shrink-0 mt-0.5" />
+                  <div className="mt-4 p-3 rounded-xl text-[11px] flex items-start gap-2 font-mono" style={{ background: 'rgba(99,102,241,0.08)', border: '1px solid rgba(99,102,241,0.2)', color: '#a5b4fc' }}>
+                    <Info className="h-4 w-4 shrink-0 mt-0.5" style={{ color: '#818cf8' }} />
                     <div>
                       <strong>IP Adresleme Standartları:</strong> Şirket ağında IP çakışmalarını sıfıra indirmek için sunucular, yazıcılar ve anahtarlar .1 ile .99 arasındaki bloklardan statik olarak el ile yapılandırılır. Kullanıcı bilgisayarları ve telefonlar ise DHCP havuzundan otomatik IP alırlar.
                     </div>
@@ -1284,7 +1321,7 @@ export default function DesignerPortal({
                 </div>
 
                 {/* Field Technician Physical Guide (5 cols) */}
-                <div className="xl:col-span-5 bg-white rounded-2xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+                <div className="xl:col-span-5 rounded-2xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                   <div>
                     <h4 className="text-xs font-mono font-bold text-slate-700 uppercase tracking-widest mb-3 border-b border-slate-200 pb-2 flex items-center gap-1.5">
                       <Cable className="h-4 w-4 text-emerald-600" /> 🛠️ SAHA TEKNİSYENİ KURULUM & BAĞLANTI REHBERİ
@@ -1292,9 +1329,9 @@ export default function DesignerPortal({
 
                     {activeNodeDetails ? (
                       <div className="space-y-4">
-                        <div className="bg-emerald-50 border border-emerald-100 p-3.5 rounded-xl">
-                          <strong className="text-emerald-800 block text-xs mb-1">🔌 Hangi Kablo ve Nasıl Bağlanacak?</strong>
-                          <div className="text-xs text-emerald-700 leading-relaxed font-sans space-y-2">
+                        <div className="p-3.5 rounded-xl" style={{ background: 'rgba(52,211,153,0.07)', border: '1px solid rgba(52,211,153,0.2)' }}>
+                          <strong className="block text-xs mb-1" style={{ color: '#34d399' }}>🔌 Hangi Kablo ve Nasıl Bağlanacak?</strong>
+                          <div className="text-xs leading-relaxed font-sans space-y-2" style={{ color: '#6ee7b7' }}>
                             <div>
                               <span className="font-bold">Önerilen Kablo Türü:</span> {activeNodeDetails.cableColor}
                             </div>
@@ -1306,36 +1343,36 @@ export default function DesignerPortal({
 
                         {/* Step-by-Step Commissioning in Field */}
                         <div>
-                          <strong className="text-slate-800 block text-xs mb-1.5">Saha Devreye Alma ve Test Adımları:</strong>
+                          <strong className="block text-xs mb-1.5" style={{ color: '#e2e8f0' }}>Saha Devreye Alma ve Test Adımları:</strong>
                           <div className="space-y-2">
-                            <div className="flex gap-2 items-start text-xs text-slate-600">
-                              <span className="bg-indigo-50 text-indigo-600 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">1</span>
+                            <div className="flex gap-2 items-start text-xs" style={{ color: '#94a3b8' }}>
+                              <span className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5" style={{ background: 'rgba(6,182,212,0.15)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.3)' }}>1</span>
                               <span>Fiziksel kabloyu switch portuna ve cihazın Ethernet portuna sıkıca oturtun. Klik sesini ve RJ45 tırnağının kilitlendiğini duyun.</span>
                             </div>
-                            <div className="flex gap-2 items-start text-xs text-slate-600">
-                              <span className="bg-indigo-50 text-indigo-600 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">2</span>
+                            <div className="flex gap-2 items-start text-xs" style={{ color: '#94a3b8' }}>
+                              <span className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5" style={{ background: 'rgba(6,182,212,0.15)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.3)' }}>2</span>
                               <span>Switch üzerindeki ilgili portun LED ışığının önce turuncu, STP (Spanning Tree) onayından sonra sabit yeşil yandığını teyit edin.</span>
                             </div>
-                            <div className="flex gap-2 items-start text-xs text-slate-600">
-                              <span className="bg-indigo-50 text-indigo-600 w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">3</span>
-                              <span>Cihaz konsolundan veya arayüzünden ağ geçidine ping atın (<code className="bg-slate-100 px-1 py-0.5 rounded font-mono">ping 10.10.x.1</code>). Paket kaybının %0 olduğunu doğrulayın.</span>
+                            <div className="flex gap-2 items-start text-xs" style={{ color: '#94a3b8' }}>
+                              <span className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5" style={{ background: 'rgba(6,182,212,0.15)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.3)' }}>3</span>
+                              <span>Cihaz konsolundan veya arayüzünden ağ geçidine ping atın (<code className="px-1 py-0.5 rounded font-mono" style={{ background: 'rgba(6,13,31,0.8)', color: '#22d3ee' }}>ping 10.10.x.1</code>). Paket kaybının %0 olduğunu doğrulayın.</span>
                             </div>
                           </div>
                         </div>
                       </div>
                     ) : (
-                      <div className="flex flex-col items-center justify-center p-8 text-center bg-slate-50 rounded-xl border border-dashed border-slate-300">
-                        <Cable className="h-8 w-8 text-slate-300 mb-2" />
-                        <strong className="text-slate-600 block text-xs">Fiziksel Kurulum Asistanı Aktif!</strong>
-                        <p className="text-[11px] text-slate-400 mt-1 max-w-[280px]">
+                      <div className="flex flex-col items-center justify-center p-8 text-center rounded-xl" style={{ background: 'rgba(6,13,31,0.6)', border: '1px dashed rgba(6,182,212,0.2)' }}>
+                        <Cable className="h-8 w-8 mb-2" style={{ color: 'rgba(6,182,212,0.3)' }} />
+                        <strong className="block text-xs" style={{ color: '#94a3b8' }}>Fiziksel Kurulum Asistanı Aktif!</strong>
+                        <p className="text-[11px] mt-1 max-w-[280px]" style={{ color: '#475569' }}>
                           Yukarıdaki Cisco ağ şemasından kurulumunu yapacağınız herhangi bir donanıma tıklayın, sahadaki teknisyeninize **birebir kablolama talimatlarını** anında verelim!
                         </p>
                       </div>
                     )}
                   </div>
 
-                  <div className="mt-4 bg-emerald-50 border border-emerald-100 p-3 rounded-xl text-[11px] text-emerald-800 font-mono">
-                    💡 <span className="font-bold">Öneri:</span> Sahadaki teknisyenin her kabloyu çektikten sonra bir etiketleme makinesi ile kablonun iki ucuna da switch port kodunu (örn: <code className="bg-white px-1 py-0.2 rounded font-mono">L1-P14</code>) yazması arıza anında müdahale süresini %90 kısaltır.
+                  <div className="mt-4 p-3 rounded-xl text-[11px] font-mono" style={{ background: 'rgba(52,211,153,0.07)', border: '1px solid rgba(52,211,153,0.18)', color: '#6ee7b7' }}>
+                    💡 <span className="font-bold">Öneri:</span> Sahadaki teknisyenin her kabloyu çektikten sonra bir etiketleme makinesi ile kablonun iki ucuna da switch port kodunu (örn: <code className="px-1 py-0.2 rounded font-mono" style={{ background: 'rgba(6,13,31,0.6)', color: '#22d3ee' }}>L1-P14</code>) yazması arıza anında müdahale süresini %90 kısaltır.
                   </div>
                 </div>
 
@@ -1349,238 +1386,62 @@ export default function DesignerPortal({
         {/* B. DETAILED BOM & BUDGET LIST SUBTAB */}
         {designerSubTab === 'budget' && (
           <div className="flex flex-col gap-6">
-            
+
             {/* Budget Limit Slider / Bar */}
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm">
-              <div className="flex flex-col md:flex-row justify-between md:items-center gap-4 mb-4">
-                <div>
-                  <h4 className="text-xs font-mono font-bold text-blue-600 flex items-center gap-1.5 uppercase">
-                    <Zap className="h-4 w-4 text-amber-500" /> TOPLAM PROJE GİDERLERİ VE MALİYET DENETLEME SİSTEMİ
-                  </h4>
-                  <p className="text-xs text-slate-500 font-sans mt-0.5">Donanım sınıfına, yedeklilik ayarlarına ve envanter adetlerinize göre hesaplanan Bill of Materials (BOM) listesi.</p>
-                </div>
-
-                <div className="flex items-center gap-3 bg-slate-50 p-2.5 rounded-xl border border-slate-200 shadow-inner">
-                  <span className="text-xs font-bold text-slate-600">Bütçe Sınırı (USD):</span>
-                  <input
-                    type="range"
-                    min="15000"
-                    max="250000"
-                    step="5000"
-                    value={localBudgetLimit}
-                    onChange={(e) => setLocalBudgetLimit(Number(e.target.value))}
-                    className="w-32 md:w-48 accent-blue-600 cursor-pointer h-1.5 bg-slate-200 rounded-lg appearance-none"
-                  />
-                  <span className="text-xs font-mono font-bold text-slate-800 bg-white px-2 py-0.5 border border-slate-200 rounded shadow-sm">
-                    ${localBudgetLimit.toLocaleString()}
-                  </span>
-                </div>
-              </div>
-
-              {/* Progress limit bar */}
-              <div>
-                <div className="flex justify-between text-xs font-mono font-bold mb-1.5">
-                  <span className="text-slate-500">Hesaplanan Proje Maliyeti:</span>
-                  <span className={isOverBudget ? 'text-red-600' : 'text-emerald-600'}>
-                    ${totalCost.toLocaleString()} ({budgetUsagePercent}%)
-                  </span>
-                </div>
-                <div className="w-full bg-slate-100 rounded-full h-3 overflow-hidden shadow-inner flex">
-                  <div
-                    style={{ width: `${budgetUsagePercent}%` }}
-                    className={`h-full rounded-full transition-all duration-500 ${
-                      isOverBudget ? 'bg-gradient-to-r from-red-500 to-rose-600' : 'bg-gradient-to-r from-emerald-500 to-blue-600'
-                    }`}
-                  />
-                </div>
-                {isOverBudget ? (
-                  <div className="mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800 font-semibold flex items-center gap-2 font-sans shadow-sm">
-                    <AlertTriangle className="h-4 w-4 text-red-600 shrink-0" />
-                    Maliyet bütçeyi ${ (totalCost - localBudgetLimit).toLocaleString() } aşıyor! Üst panelden 'Donanım Sınıfı'nı 'Ekonomik' olarak seçebilir veya envanteri küçültebilirsiniz.
-                  </div>
-                ) : (
-                  <div className="mt-3 p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs text-emerald-800 font-semibold flex items-center gap-2 font-sans shadow-sm">
-                    <CheckCircle2 className="h-4 w-4 text-emerald-600 shrink-0" />
-                    Proje maliyeti bütçe sınırları içerisindedir. Gönül rahatlığıyla satın alma ve kurulum aşamasına geçebilirsiniz!
-                  </div>
-                )}
+            <div className="p-5 rounded-2xl" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.15)' }}>
+              <div className="mb-4">
+                <h4 className="text-xs font-mono font-bold flex items-center gap-1.5 uppercase mb-1" style={{ color: '#06b6d4', fontFamily: 'Orbitron, monospace', fontSize: '9px', letterSpacing: '0.14em' }}>
+                  <Zap className="h-4 w-4" style={{ color: '#fbbf24' }} /> ◈ DONANIM MALZEME LİSTESİ (BOM)
+                </h4>
+                <p className="text-xs font-sans" style={{ color: '#4b7ab0' }}>Donanım sınıfına ve yedeklilik ayarlarına göre otomatik oluşturulan ürün listesi. Her satırda "Değiştir" ile kendi ürününüzü seçebilirsiniz.</p>
               </div>
             </div>
 
             {/* Bill of Materials Table */}
-            <div className="overflow-x-auto border border-slate-200 rounded-2xl bg-white shadow-sm">
+            <div className="overflow-x-auto rounded-2xl" style={{ border: '1px solid rgba(6,182,212,0.15)', background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)' }}>
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
-                  <tr className="bg-slate-100/80 border-b border-slate-200 font-mono text-[10px] text-slate-600">
+                  <tr className="font-mono text-[10px] border-b" style={{ background: 'rgba(6,13,31,0.9)', borderColor: 'rgba(6,182,212,0.15)', color: '#06b6d4' }}>
                     <th className="p-3.5">Donanım Kategori</th>
-                    <th className="p-3.5">Önerilen Profesyonel Ürün</th>
-                    <th className="p-3.5 text-center">Birim Fiyat</th>
+                    <th className="p-3.5">Seçili Ürün</th>
                     <th className="p-3.5 text-center">Miktar</th>
-                    <th className="p-3.5 text-right">Toplam Fiyat</th>
+                    <th className="p-3.5 text-center">Değiştir</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 text-slate-700">
-                  {/* Router */}
-                  <tr>
-                    <td className="p-3.5 font-semibold">İnternet Yönlendiricisi (Router)</td>
-                    <td className="p-3.5 text-blue-600 font-mono font-bold">
-                      {hw.router.model}
-                      <span className="block text-[10px] text-slate-400 font-normal font-sans mt-0.5">{hw.router.desc}</span>
-                    </td>
-                    <td className="p-3.5 text-center font-mono">${hw.router.price.toLocaleString()}</td>
-                    <td className="p-3.5 text-center font-mono font-semibold">{routerQty}</td>
-                    <td className="p-3.5 text-right font-mono font-bold">${(hw.router.price * routerQty).toLocaleString()}</td>
-                  </tr>
-
-                  {/* Firewall */}
-                  <tr>
-                    <td className="p-3.5 font-semibold">NGFW Güvenlik Duvarı (HA)</td>
-                    <td className="p-3.5 text-blue-600 font-mono font-bold">
-                      {hw.firewall.model}
-                      <span className="block text-[10px] text-slate-400 font-normal font-sans mt-0.5">{hw.firewall.desc}</span>
-                    </td>
-                    <td className="p-3.5 text-center font-mono">${hw.firewall.price.toLocaleString()}</td>
-                    <td className="p-3.5 text-center font-mono font-semibold">{firewallQty}</td>
-                    <td className="p-3.5 text-right font-mono font-bold">${(hw.firewall.price * firewallQty).toLocaleString()}</td>
-                  </tr>
-
-                  {/* Spine Switch */}
-                  {spineQty > 0 && (
-                    <tr>
-                      <td className="p-3.5 font-semibold">L3 Omurga Switch (Core Spine)</td>
-                      <td className="p-3.5 text-blue-600 font-mono font-bold">
-                        {hw.spine.model}
-                        <span className="block text-[10px] text-slate-400 font-normal font-sans mt-0.5">{hw.spine.desc}</span>
+                <tbody className="divide-y" style={{ color: '#94a3b8', borderColor: 'rgba(6,182,212,0.08)' }}>
+                  {([
+                    { cat: 'router'   as HardwareCategory, label: 'İnternet Yönlendiricisi (Router)',    item: hw.router,   qty: routerQty },
+                    { cat: 'firewall' as HardwareCategory, label: 'NGFW Güvenlik Duvarı',                item: hw.firewall, qty: firewallQty },
+                    ...(spineQty > 0 ? [{ cat: 'spine' as HardwareCategory, label: 'L3 Omurga Switch (Core Spine)', item: hw.spine, qty: spineQty }] : []),
+                    { cat: 'userLeaf' as HardwareCategory, label: 'Ofis Kullanıcı Dağıtım Switch',      item: hw.userLeaf, qty: userLeafQty },
+                    { cat: 'poeLeaf'  as HardwareCategory, label: 'IP Kamera & AP PoE Switch',           item: hw.poeLeaf,  qty: poeLeafQty },
+                    ...(otLeafQty > 0 ? [{ cat: 'otLeaf' as HardwareCategory, label: 'Endüstriyel OT Saha Switch', item: hw.otLeaf, qty: otLeafQty }] : []),
+                    { cat: 'server'   as HardwareCategory, label: 'Hypervisor Sanallaştırma Sunucusu',  item: hw.server,   qty: serverQty },
+                    ...(storageQty > 0 ? [{ cat: 'storage' as HardwareCategory, label: 'iSCSI SAN Veri Depolama', item: hw.storage, qty: storageQty }] : []),
+                    { cat: 'pdu'      as HardwareCategory, label: 'Akıllı Smart PDU',                   item: hw.pdu,      qty: pduQty },
+                    { cat: 'rack'     as HardwareCategory, label: 'Ağ Kabineti (Rack)',                  item: hw.rack,     qty: rackQty },
+                  ] as { cat: HardwareCategory; label: string; item: { model: string; desc?: string }; qty: number }[]).map(({ cat, label, item, qty }) => (
+                    <tr key={cat}>
+                      <td className="p-3.5 font-semibold">{label}</td>
+                      <td className="p-3.5 font-mono font-bold" style={{ color: customProducts[cat] ? '#fbbf24' : '#38bdf8' }}>
+                        {item.model}
+                        {customProducts[cat] && <span className="ml-1 text-[9px] font-sans px-1 py-0.5 rounded" style={{ background: 'rgba(251,191,36,0.15)', color: '#fbbf24' }}>Özel</span>}
+                        {'desc' in item && item.desc && <span className="block text-[10px] font-normal font-sans mt-0.5" style={{ color: '#64748b' }}>{item.desc}</span>}
                       </td>
-                      <td className="p-3.5 text-center font-mono">${hw.spine.price.toLocaleString()}</td>
-                      <td className="p-3.5 text-center font-mono font-semibold">{spineQty}</td>
-                      <td className="p-3.5 text-right font-mono font-bold">${(hw.spine.price * spineQty).toLocaleString()}</td>
-                    </tr>
-                  )}
-
-                  {/* User Leaf Switches */}
-                  <tr>
-                    <td className="p-3.5 font-semibold">Ofis Kullanıcı Dağıtım Switch (Leaf)</td>
-                    <td className="p-3.5 text-blue-600 font-mono font-bold">
-                      {hw.userLeaf.model}
-                      <span className="block text-[10px] text-slate-400 font-normal font-sans mt-0.5">{hw.userLeaf.desc}</span>
-                    </td>
-                    <td className="p-3.5 text-center font-mono">${hw.userLeaf.price.toLocaleString()}</td>
-                    <td className="p-3.5 text-center font-mono font-semibold">{userLeafQty}</td>
-                    <td className="p-3.5 text-right font-mono font-bold">${(hw.userLeaf.price * userLeafQty).toLocaleString()}</td>
-                  </tr>
-
-                  {/* PoE Leaf Switches */}
-                  <tr>
-                    <td className="p-3.5 font-semibold">IP Kamera & AP PoE Dağıtım Switch</td>
-                    <td className="p-3.5 text-blue-600 font-mono font-bold">
-                      {hw.poeLeaf.model}
-                      <span className="block text-[10px] text-slate-400 font-normal font-sans mt-0.5">{hw.poeLeaf.desc}</span>
-                    </td>
-                    <td className="p-3.5 text-center font-mono">${hw.poeLeaf.price.toLocaleString()}</td>
-                    <td className="p-3.5 text-center font-mono font-semibold">{poeLeafQty}</td>
-                    <td className="p-3.5 text-right font-mono font-bold">${(hw.poeLeaf.price * poeLeafQty).toLocaleString()}</td>
-                  </tr>
-
-                  {/* OT Switches */}
-                  {otLeafQty > 0 && (
-                    <tr>
-                      <td className="p-3.5 font-semibold">Endüstriyel OT Saha Switch</td>
-                      <td className="p-3.5 text-blue-600 font-mono font-bold">
-                        {hw.otLeaf.model}
-                        <span className="block text-[10px] text-slate-400 font-normal font-sans mt-0.5">{hw.otLeaf.desc}</span>
+                      <td className="p-3.5 text-center font-mono font-semibold">{qty}</td>
+                      <td className="p-3.5 text-center">
+                        <button onClick={() => setPickerCategory(cat)} className="text-[10px] px-2 py-1 rounded font-semibold transition-all" style={{ background: 'rgba(6,182,212,0.12)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}>Değiştir</button>
                       </td>
-                      <td className="p-3.5 text-center font-mono">${hw.otLeaf.price.toLocaleString()}</td>
-                      <td className="p-3.5 text-center font-mono font-semibold">{otLeafQty}</td>
-                      <td className="p-3.5 text-right font-mono font-bold">${(hw.otLeaf.price * otLeafQty).toLocaleString()}</td>
                     </tr>
-                  )}
-
-                  {/* Servers */}
-                  <tr>
-                    <td className="p-3.5 font-semibold">Hypervisor Sanallaştırma Sunucusu</td>
-                    <td className="p-3.5 text-blue-600 font-mono font-bold">
-                      {hw.server.model}
-                      <span className="block text-[10px] text-slate-400 font-normal font-sans mt-0.5">{hw.server.desc}</span>
+                  ))}
+                  {/* Cables summary */}
+                  <tr style={{ background: 'rgba(6,13,31,0.4)' }}>
+                    <td className="p-3.5 font-semibold" style={{ color: '#94a3b8' }}>Kablolama Altyapısı</td>
+                    <td className="p-3.5 font-mono text-[10px]" style={{ color: '#4b7ab0' }}>
+                      {cat6BlueQty}x Mavi Cat6 · {cat6YellowQty}x Sarı Cat6 · {cat6GreenQty}x Yeşil Cat6 · {dacBlackQty}x SFP+ DAC · {fiberOM4Qty}x OM4 Fiber · {opticTransceiverQty}x SFP+ Modül
                     </td>
-                    <td className="p-3.5 text-center font-mono">${hw.server.price.toLocaleString()}</td>
-                    <td className="p-3.5 text-center font-mono font-semibold">{serverQty}</td>
-                    <td className="p-3.5 text-right font-mono font-bold">${(hw.server.price * serverQty).toLocaleString()}</td>
-                  </tr>
-
-                  {/* SAN Storage */}
-                  {storageQty > 0 && (
-                    <tr>
-                      <td className="p-3.5 font-semibold">iSCSI SAN Merkezi Veri Depolama</td>
-                      <td className="p-3.5 text-blue-600 font-mono font-bold">
-                        {hw.storage.model}
-                        <span className="block text-[10px] text-slate-400 font-normal font-sans mt-0.5">{hw.storage.desc}</span>
-                      </td>
-                      <td className="p-3.5 text-center font-mono">${hw.storage.price.toLocaleString()}</td>
-                      <td className="p-3.5 text-center font-mono font-semibold">{storageQty}</td>
-                      <td className="p-3.5 text-right font-mono font-bold">${(hw.storage.price * storageQty).toLocaleString()}</td>
-                    </tr>
-                  )}
-
-                  {/* Rack */}
-                  <tr>
-                    <td className="p-3.5 font-semibold">Premium Perfore Ağ Kabineti</td>
-                    <td className="p-3.5 text-blue-600 font-mono font-bold">{hw.rack.model}</td>
-                    <td className="p-3.5 text-center font-mono">${hw.rack.price.toLocaleString()}</td>
-                    <td className="p-3.5 text-center font-mono font-semibold">{rackQty}</td>
-                    <td className="p-3.5 text-right font-mono font-bold">${(hw.rack.price * rackQty).toLocaleString()}</td>
-                  </tr>
-
-                  {/* Cables Estimate */}
-                  <tr>
-                    <td className="p-3.5 font-semibold">Kablolama Altyapısı (Cat6, OM4 Fiber, SFP+ DAC)</td>
-                    <td className="p-3.5 text-slate-600">
-                      Ofis içi dikey ve yatay tüm bağlantı kabloları:
-                      <span className="block text-[10px] text-slate-400 font-mono mt-0.5">
-                        {cat6BlueQty}x Mavi Cat6, {cat6YellowQty}x Sarı Cat6, {cat6GreenQty}x Yeşil Cat6, {dacBlackQty}x SFP+ DAC, {fiberOM4Qty}x OM4 Fiber
-                      </span>
-                    </td>
-                    <td className="p-3.5 text-center font-mono">-</td>
-                    <td className="p-3.5 text-center font-mono">-</td>
-                    <td className="p-3.5 text-right font-mono font-bold">${cableCosts.toLocaleString()}</td>
-                  </tr>
-
-                  {/* Optic SFP+ Modules */}
-                  <tr>
-                    <td className="p-3.5 font-semibold">Fiber Optik SFP+ Lazer Transceiver Modülleri</td>
-                    <td className="p-3.5 text-slate-600">
-                      Switch Uplink portları için {opticTransceiverQty} adet fiber modül.
-                    </td>
-                    <td className="p-3.5 text-center font-mono">-</td>
-                    <td className="p-3.5 text-center font-mono">-</td>
-                    <td className="p-3.5 text-right font-mono font-bold">${opticCosts.toLocaleString()}</td>
-                  </tr>
-
-                  {/* Patch Panels */}
-                  <tr>
-                    <td className="p-3.5 font-semibold">Cat6 RJ45 24-Port Patch Paneller</td>
-                    <td className="p-3.5 text-slate-600">
-                      Kabin içi kablo sonlandırma panelleri ({Math.max(1, Math.ceil(patchPanelCat6Ports/24))} adet).
-                    </td>
-                    <td className="p-3.5 text-center font-mono">-</td>
-                    <td className="p-3.5 text-center font-mono">-</td>
-                    <td className="p-3.5 text-right font-mono font-bold">${patchPanelCosts.toLocaleString()}</td>
-                  </tr>
-
-                  {/* Labor */}
-                  <tr className="bg-slate-50/50">
-                    <td className="p-3.5 font-semibold text-slate-800">Uçtan Uca Sertifikasyon & Kurulum İşçiliği</td>
-                    <td className="p-3.5 text-slate-500 italic">Etiketleme, Fluke Testi ve Devreye Alma Hizmetleri</td>
-                    <td className="p-3.5 text-center font-mono">-</td>
-                    <td className="p-3.5 text-center font-mono">-</td>
-                    <td className="p-3.5 text-right font-mono font-bold text-slate-800">${laborCost.toLocaleString()}</td>
-                  </tr>
-
-                  {/* TOTAL SUM */}
-                  <tr className="bg-slate-900 text-white font-extrabold text-sm">
-                    <td className="p-4" colSpan={3}>TOPLAM PROJE SATIN ALMA BEDELİ (BOM BEDELİ)</td>
-                    <td className="p-4 text-center font-mono font-extrabold">-</td>
-                    <td className="p-4 text-right font-mono text-blue-400 font-extrabold">${totalCost.toLocaleString()}</td>
+                    <td className="p-3.5 text-center font-mono" style={{ color: '#4b7ab0' }}>-</td>
+                    <td></td>
                   </tr>
                 </tbody>
               </table>
@@ -1592,11 +1453,11 @@ export default function DesignerPortal({
         {/* C. ALL INVENTORY PRODUCTS - EDUCATIONAL GUIDE (Sıfırdan Öğrenenler İçin Eğitim Kılavuzu) */}
         {designerSubTab === 'components' && (
           <div className="space-y-6">
-            <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border border-blue-100 rounded-2xl p-5 shadow-sm">
-              <h3 className="text-sm font-extrabold text-blue-900 flex items-center gap-2 mb-2 font-sans">
-                <Compass className="h-5 w-5 text-blue-600" /> SIFIRDAN ÖĞRENİM: TÜM ENVANTER ÜRÜNLERİNİN GÖREVLERİ VE GEREKLİLİKLERİ
+            <div className="rounded-2xl p-5" style={{ background: 'linear-gradient(135deg, rgba(6,182,212,0.07) 0%, rgba(139,92,246,0.05) 100%)', border: '1px solid rgba(6,182,212,0.2)' }}>
+              <h3 className="text-sm font-extrabold flex items-center gap-2 mb-2 font-sans" style={{ color: '#e2e8f0', fontFamily: 'Orbitron, monospace', fontSize: '11px', letterSpacing: '0.06em' }}>
+                <Compass className="h-5 w-5" style={{ color: '#06b6d4' }} /> ◈ SIFIRDAN ÖĞRENİM: TÜM ENVANTER ÜRÜNLERİNİN GÖREVLERİ VE GEREKLİLİKLERİ
               </h3>
-              <p className="text-xs text-blue-700 leading-relaxed font-sans">
+              <p className="text-xs leading-relaxed font-sans" style={{ color: '#4b7ab0' }}>
                 Bir kurumsal ağ mimarisinde kullanılan tüm donanımlar süs veya rastgele seçim değildir. Her cihaz, veri trafiğinin güvenli, hızlı ve kesintisiz akmasını sağlayan hayati birer dişlidir. Aşağıda, projenizde seçtiğiniz her bir envanter ürününün neden var olduğunu ve ne işe yaradığını tane tane öğrenebilirsiniz.
               </p>
             </div>
@@ -1604,7 +1465,7 @@ export default function DesignerPortal({
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
               
               {/* 1. Edge Router */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-rose-50 text-rose-600 rounded-lg">
@@ -1623,7 +1484,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 2. NGFW Firewall */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-red-50 text-red-600 rounded-lg">
@@ -1642,7 +1503,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 3. Core Spine Switch */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-blue-50 text-blue-600 rounded-lg">
@@ -1661,7 +1522,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 4. User Leaf Switch */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-amber-50 text-amber-600 rounded-lg">
@@ -1680,7 +1541,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 5. PoE Switch */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg">
@@ -1699,7 +1560,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 6. OT Industrial Switch */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-purple-50 text-purple-600 rounded-lg">
@@ -1718,7 +1579,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 7. Virtualization Server */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-cyan-50 text-cyan-600 rounded-lg">
@@ -1737,7 +1598,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 8. SAN Storage */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-teal-50 text-teal-600 rounded-lg">
@@ -1756,7 +1617,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 9. Smart PDU & UPS */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-orange-50 text-orange-600 rounded-lg">
@@ -1775,7 +1636,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 10. Modbus Gateway */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-amber-50 text-amber-600 rounded-lg">
@@ -1794,7 +1655,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 11. Kabinet Rack (Cabinet Chassis) */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-slate-50 text-slate-600 rounded-lg">
@@ -1813,7 +1674,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 12. Kullanıcı Cihazları (PC, Phone, Printer, AP) */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-sky-50 text-sky-600 rounded-lg">
@@ -1832,7 +1693,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 13. CCTV Kamera & IoT Donanımları */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-emerald-50 text-emerald-600 rounded-lg">
@@ -1851,7 +1712,7 @@ export default function DesignerPortal({
               </div>
 
               {/* 14. Endüstriyel OT Cihazları (PLC & CNC) */}
-              <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm flex flex-col justify-between">
+              <div className="rounded-xl p-5 flex flex-col justify-between" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.13)' }}>
                 <div>
                   <div className="flex items-center gap-2 mb-2.5">
                     <div className="p-1.5 bg-indigo-50 text-indigo-600 rounded-lg">
@@ -1876,16 +1737,16 @@ export default function DesignerPortal({
         {/* ======================================= */}
         {/* D. STEP BY STEP INSTALLATION CHECKLIST - 16 DETAILED STEPS */}
         {designerSubTab === 'checklist' && (
-          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">
-            <div className="flex items-center justify-between mb-2 pb-2 border-b border-slate-100">
-              <h4 className="text-xs font-mono font-bold text-blue-600 uppercase tracking-widest flex items-center gap-1.5">
-                <CheckSquare className="h-5 w-5 text-emerald-500" /> SIFIRDAN ADIM ADIM PROFESYONEL AG KURULUM REHBERİ (16 ADIM)
+          <div className="rounded-2xl p-6" style={{ background: 'linear-gradient(135deg, #0f1e3d 0%, #0a1530 100%)', border: '1px solid rgba(6,182,212,0.15)' }}>
+            <div className="flex items-center justify-between mb-2 pb-2 border-b" style={{ borderColor: 'rgba(6,182,212,0.15)' }}>
+              <h4 className="text-xs font-mono font-bold uppercase tracking-widest flex items-center gap-1.5" style={{ color: '#06b6d4', fontFamily: 'Orbitron, monospace', fontSize: '9px', letterSpacing: '0.14em' }}>
+                <CheckSquare className="h-5 w-5" style={{ color: '#34d399' }} /> ◈ SIFIRDAN ADIM ADIM PROFESYONEL AG KURULUM REHBERİ (16 ADIM)
               </h4>
-              <span className="text-[10px] font-mono bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded font-bold">
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded font-bold" style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.25)' }}>
                 ANSI/TIA-568 STANDARTLARINDA
               </span>
             </div>
-            <p className="text-xs text-slate-500 mb-5 font-sans leading-relaxed">
+            <p className="text-xs mb-5 font-sans leading-relaxed" style={{ color: '#4b7ab0' }}>
               Hiçbir ağ veya donanım bilgisi olmayan bir saha montajcısının veya teknisyenin dahi sıfırdan takip ederek, bir fabrikada veya holding binasında hatasız, cisco standartlarında bir altyapı kurmasını sağlayacak eksiksiz kurulum kılavuzu:
             </p>
 
@@ -1893,12 +1754,12 @@ export default function DesignerPortal({
               
               {/* SOL SÜTUN: FİZİKSEL VE ALTYAPI KURULUMU (1-8) */}
               <div className="space-y-4">
-                <div className="p-3 font-mono font-bold text-slate-700 bg-slate-100/70 border-l-4 border-slate-400 rounded">
+                <div className="p-3 font-mono font-bold rounded" style={{ background: 'rgba(6,182,212,0.07)', borderLeft: '3px solid #06b6d4', color: '#06b6d4', fontFamily: 'Orbitron, monospace', fontSize: '9px', letterSpacing: '0.12em' }}>
                   ETAP I: FİZİKSEL HAZIRLIK & YAPISAL ALTYAPI
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">1</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>1</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">Saha Keşfi, Çevre ve İklimlendirme Hazırlığı:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -1908,7 +1769,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">2</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>2</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">MDF Kabinet Sismik Montajı ve Bakır Topraklama:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -1918,7 +1779,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">3</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>3</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">Güç Kaynağı, UPS ve Çift Akıllı PDU Montajı:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -1928,7 +1789,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">4</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>4</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">Donanımların Kabin Layout'una Göre Dizilmesi (Ağır-Hafif):</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -1938,7 +1799,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">5</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>5</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">Yapısal Yatay Kablolama ve Patch Panel Sonlandırma:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -1948,7 +1809,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">6</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>6</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">Kablo Renk Kodlaması ve Kanal İçi Dağıtım Standardı:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -1958,7 +1819,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">7</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>7</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">Masaüstü ve Saha Priz Gruplarının Keystone Sonlandırması:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -1968,7 +1829,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">8</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>8</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">IDF Kat Kabinlerinin Konumlandırılması ve Kat İçi Dağıtım:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -1980,12 +1841,12 @@ export default function DesignerPortal({
 
               {/* SAĞ SÜTUN: ELEKTRİK, BAĞLANTI VE AKTİF CİHAZ YÖNETİMİ (9-16) */}
               <div className="space-y-4">
-                <div className="p-3 font-mono font-bold text-slate-700 bg-slate-100/70 border-l-4 border-slate-400 rounded">
+                <div className="p-3 font-mono font-bold rounded" style={{ background: 'rgba(6,182,212,0.07)', borderLeft: '3px solid #06b6d4', color: '#06b6d4', fontFamily: 'Orbitron, monospace', fontSize: '9px', letterSpacing: '0.12em' }}>
                   ETAP II: GÜÇ, AKTİF DONANIM, YEDEKLİLİK & GÜVENLİK
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">9</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>9</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">Çapraz Elektrik Bağlantıları ve PSU Yedekliliği:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -1995,7 +1856,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">10</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>10</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">MDF - IDF Omurga Fiber Optik Uplink Bağlantıları:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -2005,7 +1866,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">11</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>11</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">Aktif Cihazların İlk Boot Testi ve Konsol Girişi:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -2015,7 +1876,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">12</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>12</div>
                   <div>
                     <strong className="text-slate-800 text-xs block mb-1 font-sans">802.1Q Trunk, VLAN'lar ve Spanning-Tree Yapılandırması:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -2025,7 +1886,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">13</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>13</div>
                   <div>
                     <strong className="text-slate-800 block mb-1 text-xs font-sans">HA Yedeklilik, LACP Bağlantıları ve VRRP/BGP Kurulumu:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -2035,7 +1896,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">14</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>14</div>
                   <div>
                     <strong className="text-slate-800 block mb-1 text-xs font-sans">OT/Saha Modbus Gateway ve IP Dağıtım Konfigürasyonu:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -2045,7 +1906,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">15</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>15</div>
                   <div>
                     <strong className="text-slate-800 block mb-1 text-xs font-sans">Port Güvenliği (802.1X / MAC Binding) ve Güvenlik Duvarı Kural Sıkılaştırması:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -2055,7 +1916,7 @@ export default function DesignerPortal({
                 </div>
 
                 <div className="p-4 border border-slate-200 rounded-xl bg-slate-50/60 flex items-start gap-3.5 hover:border-slate-300 transition-all">
-                  <div className="w-6 h-6 rounded-full bg-blue-600 text-white font-mono text-xs font-bold flex items-center justify-center shrink-0">16</div>
+                  <div className="w-6 h-6 rounded-full font-mono text-xs font-bold flex items-center justify-center shrink-0" style={{ background: "rgba(6,182,212,0.15)", color: "#06b6d4", border: "1px solid rgba(6,182,212,0.35)" }}>16</div>
                   <div>
                     <strong className="text-slate-800 block mb-1 text-xs font-sans">Fluke Sertifikasyonu, Kalıcı Etiketleme ve Yapılandırma Yedeği:</strong>
                     <span className="text-slate-500 block leading-relaxed text-[11px] font-sans">
@@ -2072,5 +1933,156 @@ export default function DesignerPortal({
       </div>
 
     </div>
+
+    {/* ═══════════════════════════════════════════════
+        PRODUCT PICKER MODAL
+        ═══════════════════════════════════════════════ */}
+    {pickerCategory && (
+      <div
+        className="fixed inset-0 z-50 flex items-center justify-center p-4"
+        style={{ background: 'rgba(4,12,26,0.88)', backdropFilter: 'blur(10px)' }}
+        onClick={() => { setPickerCategory(null); setAiSearchResult(null); setPickerSearch(''); }}
+      >
+        <div
+          className="w-full max-w-3xl max-h-[88vh] flex flex-col rounded-2xl overflow-hidden"
+          style={{ background: '#0a1530', border: '1px solid rgba(6,182,212,0.3)', boxShadow: '0 0 80px rgba(6,182,212,0.18)' }}
+          onClick={e => e.stopPropagation()}
+        >
+          {/* Modal Header */}
+          <div className="px-5 py-4 flex items-center justify-between shrink-0" style={{ background: 'rgba(6,13,31,0.85)', borderBottom: '1px solid rgba(6,182,212,0.15)' }}>
+            <div>
+              <p className="text-[10px] font-mono uppercase tracking-widest" style={{ color: '#06b6d4' }}>Donanım Seçici</p>
+              <h3 className="text-sm font-bold mt-0.5" style={{ color: '#e2e8f0', fontFamily: 'Orbitron, monospace' }}>
+                {CATEGORY_LABELS[pickerCategory] ?? pickerCategory}
+              </h3>
+            </div>
+            <div className="flex items-center gap-2">
+              {customProducts[pickerCategory] && (
+                <button
+                  onClick={() => { setCustomProducts(prev => { const n = { ...prev }; delete n[pickerCategory!]; return n; }); setPickerCategory(null); setAiSearchResult(null); setPickerSearch(''); }}
+                  className="flex items-center gap-1 text-xs px-3 py-1.5 rounded-lg font-semibold"
+                  style={{ background: 'rgba(239,68,68,0.1)', color: '#f87171', border: '1px solid rgba(239,68,68,0.2)' }}
+                >
+                  <RefreshCw className="h-3 w-3" /> Varsayılanı Kullan
+                </button>
+              )}
+              <button onClick={() => { setPickerCategory(null); setAiSearchResult(null); setPickerSearch(''); }} className="p-2 rounded-lg" style={{ background: 'rgba(255,255,255,0.05)', color: '#94a3b8' }}>
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          {/* AI Custom Search Bar */}
+          <div className="px-5 py-3 shrink-0" style={{ background: 'rgba(6,182,212,0.04)', borderBottom: '1px solid rgba(6,182,212,0.1)' }}>
+            <p className="text-[10px] font-mono mb-2" style={{ color: '#4b7ab0' }}>Listede olmayan bir ürün ara — AI otomatik olarak özelliklerini bulur:</p>
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={pickerSearch}
+                onChange={e => setPickerSearch(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && searchProductWithAi()}
+                placeholder="Örn: Cisco Nexus 9300, Juniper EX4300, Huawei CE6870..."
+                className="flex-1 text-xs px-3 py-2 rounded-lg outline-none"
+                style={{ background: 'rgba(6,13,31,0.8)', border: '1px solid rgba(6,182,212,0.25)', color: '#e2e8f0', fontFamily: 'JetBrains Mono, monospace' }}
+              />
+              <button
+                onClick={searchProductWithAi}
+                disabled={isSearchingAi || !pickerSearch.trim()}
+                className="text-xs px-4 py-2 rounded-lg font-bold transition-all shrink-0"
+                style={{ background: isSearchingAi ? 'rgba(6,182,212,0.08)' : 'rgba(6,182,212,0.18)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.35)' }}
+              >
+                {isSearchingAi ? '⏳ Aranıyor...' : '🤖 AI ile Ara'}
+              </button>
+            </div>
+            {/* AI result card */}
+            {aiSearchResult && (
+              <div className="mt-3 rounded-xl p-3 flex items-start justify-between gap-3" style={{ background: 'rgba(6,182,212,0.08)', border: '1px solid rgba(6,182,212,0.3)' }}>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="text-xs font-mono font-bold" style={{ color: '#06b6d4' }}>{aiSearchResult.brand} {aiSearchResult.model}</span>
+                    <span className="text-[9px] px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(139,92,246,0.2)', color: '#a78bfa', border: '1px solid rgba(139,92,246,0.3)' }}>🤖 AI Bulunan</span>
+                  </div>
+                  <p className="text-[11px] mb-1" style={{ color: '#64748b' }}>{aiSearchResult.desc}</p>
+                  <div className="flex gap-3 text-[10px] font-mono" style={{ color: '#4b7ab0' }}>
+                    <span>🔌 {aiSearchResult.ports}</span>
+                    {aiSearchResult.throughput && <span>⚡ {aiSearchResult.throughput}</span>}
+                  </div>
+                  {aiSearchResult.whySelected && <p className="text-[10px] mt-1" style={{ color: '#34d399' }}>→ {aiSearchResult.whySelected}</p>}
+                </div>
+                <button
+                  className="shrink-0 text-[10px] px-3 py-1.5 rounded-lg font-bold"
+                  style={{ background: 'rgba(6,182,212,0.2)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.4)' }}
+                  onClick={() => {
+                    const id = `ai:${pickerCategory}:${Date.now()}`;
+                    setCustomProductsData(prev => ({ ...prev, [id]: { model: `${aiSearchResult!.brand} ${aiSearchResult!.model}`, ports: aiSearchResult!.ports, desc: aiSearchResult!.desc, whySelected: aiSearchResult!.whySelected } }));
+                    setCustomProducts(prev => ({ ...prev, [pickerCategory!]: id }));
+                    setPickerCategory(null); setAiSearchResult(null); setPickerSearch('');
+                  }}
+                >
+                  Seç
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* Product List from catalog */}
+          <div className="overflow-y-auto flex-1 p-4 space-y-2">
+            <p className="text-[10px] font-mono uppercase tracking-wider mb-3" style={{ color: '#4b7ab0' }}>Katalogdaki ürünler ({HARDWARE_CATALOG.filter(p => p.category === pickerCategory).length} ürün):</p>
+            {HARDWARE_CATALOG.filter(p => p.category === pickerCategory).map(product => {
+              const isSelected = customProducts[pickerCategory] === product.id;
+              const tierColors: Record<string, string> = { economic: '#34d399', medium: '#06b6d4', premium: '#818cf8', ultra: '#fbbf24' };
+              const tierColor = tierColors[product.tier] ?? '#94a3b8';
+              return (
+                <div
+                  key={product.id}
+                  className="rounded-xl p-3.5 transition-all cursor-pointer"
+                  style={{
+                    background: isSelected ? 'rgba(6,182,212,0.1)' : 'rgba(15,30,61,0.5)',
+                    border: `1px solid ${isSelected ? 'rgba(6,182,212,0.4)' : 'rgba(30,58,110,0.5)'}`,
+                    boxShadow: isSelected ? '0 0 12px rgba(6,182,212,0.15)' : 'none'
+                  }}
+                  onClick={() => { setCustomProducts(prev => ({ ...prev, [pickerCategory]: product.id })); setPickerCategory(null); setAiSearchResult(null); setPickerSearch(''); }}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap mb-1">
+                        <span className="text-xs font-mono font-bold" style={{ color: isSelected ? '#06b6d4' : '#e2e8f0' }}>
+                          {product.brand} {product.model}
+                        </span>
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase" style={{ background: `${tierColor}18`, color: tierColor, border: `1px solid ${tierColor}30` }}>
+                          {product.tier}
+                        </span>
+                        {isSelected && <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full" style={{ background: 'rgba(6,182,212,0.2)', color: '#06b6d4' }}>✓ Seçili</span>}
+                      </div>
+                      <p className="text-[11px] leading-relaxed" style={{ color: '#64748b' }}>{product.desc}</p>
+                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[10px] font-mono mt-1" style={{ color: '#4b7ab0' }}>
+                        <span>🔌 {product.ports}</span>
+                        {product.throughput && <span>⚡ {product.throughput}</span>}
+                      </div>
+                      {product.whySelected && (
+                        <p className="text-[10px] mt-1.5" style={{ color: '#475569' }}>
+                          <span style={{ color: '#34d399' }}>→</span> {product.whySelected}
+                        </p>
+                      )}
+                    </div>
+                    <button
+                      className="shrink-0 text-[10px] px-3 py-1.5 rounded-lg font-bold transition-all mt-0.5"
+                      style={isSelected
+                        ? { background: 'rgba(6,182,212,0.2)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.4)' }
+                        : { background: 'rgba(6,182,212,0.06)', color: '#38bdf8', border: '1px solid rgba(6,182,212,0.15)' }
+                      }
+                      onClick={e => { e.stopPropagation(); setCustomProducts(prev => ({ ...prev, [pickerCategory]: product.id })); setPickerCategory(null); setAiSearchResult(null); setPickerSearch(''); }}
+                    >
+                      {isSelected ? '✓' : 'Seç'}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
